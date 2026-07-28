@@ -1,0 +1,135 @@
+<script lang="ts">
+  import { invoke } from '@tauri-apps/api/core';
+  import { onMount } from 'svelte';
+  import type { Conversation, Message } from '$lib/types';
+
+  let conversations = $state<Conversation[]>([]);
+  let selectedConv = $state<string | null>(null);
+  let messages = $state<Message[]>([]);
+  let loading = $state(false);
+  let selectedPlatform = $state('Twitter');
+
+  async function loadConversations() {
+    loading = true;
+    try {
+      conversations = await invoke('get_conversations', { platform: selectedPlatform });
+    } catch {
+      conversations = [];
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function selectConversation(id: string) {
+    selectedConv = id;
+    try {
+      messages = await invoke('get_messages', {
+        conversationId: id,
+        platform: selectedPlatform,
+      });
+    } catch {
+      messages = [];
+    }
+  }
+
+  function formatTimestamp(ts: number) {
+    const d = new Date(ts * 1000);
+    const now = Date.now();
+    const diff = now - d.getTime();
+    const hours = Math.floor(diff / 3600000);
+    if (hours < 1) return 'just now';
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }
+
+  onMount(loadConversations);
+</script>
+
+<div class="inbox-page">
+  <div class="inbox-header">
+    <h2 class="inbox-title">Inbox</h2>
+    <p class="inbox-subtitle">unified messages from all networks</p>
+  </div>
+
+  <div class="inbox-toolbar">
+    <select bind:value={selectedPlatform} onchange={loadConversations} class="platform-select">
+      <option value="Instagram">Instagram</option>
+      <option value="Twitter">Twitter</option>
+      <option value="LinkedIn">LinkedIn</option>
+    </select>
+    <button class="btn btn-ghost" onclick={loadConversations} disabled={loading}>
+      {loading ? '...' : 'Refresh'}
+    </button>
+  </div>
+
+  <div class="inbox-layout">
+    <div class="conv-list">
+      {#if conversations.length === 0}
+        <p class="empty-hint">No conversations yet.</p>
+      {/if}
+      {#each conversations as conv}
+        <div
+          class="conv-item"
+          class:selected={selectedConv === conv.id}
+          onclick={() => selectConversation(conv.id)}
+          role="button"
+          tabindex="0"
+          onkeydown={(e) => e.key === 'Enter' && selectConversation(conv.id)}
+        >
+          <div class="conv-info">
+            <span class="conv-participants">{conv.participants.join(', ')}</span>
+            <span class="conv-time">{formatTimestamp(conv.last_message_at)}</span>
+          </div>
+          {#if conv.unread}
+            <span class="unread-badge">●</span>
+          {/if}
+        </div>
+      {/each}
+    </div>
+
+    <div class="msg-area">
+      {#if selectedConv}
+        <div class="msg-list">
+          {#each messages as msg}
+            <div class="msg-bubble">
+              <div class="msg-sender">{msg.sender_id}</div>
+              <div class="msg-content">{msg.content}</div>
+              <div class="msg-time">{formatTimestamp(msg.timestamp)}</div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <p class="empty-hint">Select a conversation to view messages.</p>
+      {/if}
+    </div>
+  </div>
+</div>
+
+<style>
+  .inbox-page { max-width: var(--max-width); }
+  .inbox-header { margin-bottom: 1.5rem; }
+  .inbox-title { font-size: 1.5rem; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
+  .inbox-subtitle { font-size: 0.85rem; color: var(--fg-muted); margin: 0.25rem 0 0 0; }
+  .inbox-toolbar { display: flex; gap: 0.5rem; margin-bottom: 1rem; align-items: center; }
+  .platform-select { padding: 0.35rem 0.6rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg); font-size: 0.85rem; }
+  .btn { padding: 0.4rem 0.85rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem; transition: all 0.15s; cursor: pointer; }
+  .btn-ghost { background: transparent; color: var(--fg-muted); }
+  .btn-ghost:hover { background: var(--bg); color: var(--fg); }
+  .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+  .inbox-layout { display: grid; grid-template-columns: 260px 1fr; gap: 1rem; min-height: 400px; }
+  .conv-list { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 0.5rem; max-height: 500px; overflow-y: auto; }
+  .conv-item { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; border-radius: var(--radius); cursor: pointer; transition: background 0.1s; }
+  .conv-item:hover { background: var(--bg); }
+  .conv-item.selected { background: var(--bg); font-weight: 500; }
+  .conv-info { display: flex; flex-direction: column; gap: 0.15rem; }
+  .conv-participants { font-size: 0.85rem; }
+  .conv-time { font-size: 0.75rem; color: var(--fg-muted); }
+  .unread-badge { color: var(--accent); font-size: 0.75rem; }
+  .msg-area { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 1rem; max-height: 500px; overflow-y: auto; }
+  .msg-list { display: flex; flex-direction: column; gap: 0.75rem; }
+  .msg-bubble { padding: 0.5rem 0.75rem; background: var(--bg); border-radius: var(--radius); }
+  .msg-sender { font-size: 0.8rem; font-weight: 500; margin-bottom: 0.25rem; }
+  .msg-content { font-size: 0.9rem; line-height: 1.5; }
+  .msg-time { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.25rem; }
+  .empty-hint { color: var(--fg-muted); font-size: 0.85rem; text-align: center; padding: 2rem 0; }
+</style>
