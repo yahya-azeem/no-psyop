@@ -41,6 +41,12 @@ export interface ContentCluster {
   items: Post[];
 }
 
+export interface PostFilterResult {
+  is_synthetic: boolean;
+  bait_score: number;
+  should_filter: boolean;
+}
+
 export interface Intent {
   query: string;
   platforms: Platform[];

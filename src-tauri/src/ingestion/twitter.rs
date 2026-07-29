@@ -195,7 +195,7 @@ impl PlatformIngester for TwitterIngester {
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
         let mut client = HttpClient::with_session(&credential.session_token);
-        let guest_token = self.get_guest_token(&mut client).await.unwrap_or_default();
+        let _guest_token = self.get_guest_token(&mut client).await.unwrap_or_default();
 
         let features = serde_json::json!({
             "rweb_tipjar_consumption_enabled": true,
@@ -241,8 +241,8 @@ impl PlatformIngester for TwitterIngester {
 
     async fn fetch_profile(&mut self, credential: &Credential, username: &str) -> Result<SocialUser, String> {
         let mut client = HttpClient::with_session(&credential.session_token);
-        let guest_token = self.get_guest_token(&mut client).await.unwrap_or_default();
-        let csrf_token = credential.session_token
+        let _guest_token = self.get_guest_token(&mut client).await.unwrap_or_default();
+        let _csrf_token = credential.session_token
             .split(';')
             .find(|p| p.trim().starts_with("ct0="))
             .and_then(|p| p.split('=').nth(1))
@@ -296,7 +296,7 @@ impl PlatformIngester for TwitterIngester {
     }
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
-        let mut client = HttpClient::with_session(&credential.session_token);
+        let client = HttpClient::with_session(&credential.session_token);
 
         let variables = serde_json::json!({
             "count": 20,

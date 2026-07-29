@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod types;
 mod store;
 mod graph;
@@ -19,19 +21,27 @@ struct AppState {
 }
 
 #[tauri::command]
-fn get_feed(state: State<AppState>, platform: Option<String>) -> Result<Vec<types::FeedItem>, String> {
+fn get_feed(state: State<AppState>, user_id: Option<String>, platform: Option<String>) -> Result<Vec<types::FeedItem>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let ml = &state.ml;
     let platform = platform.as_deref().unwrap_or("All");
+    let uid = user_id.as_deref().unwrap_or("");
+
     let wrap = |p: types::Post| -> types::FeedItem {
         let result = ml.filter_post(&p);
+        let prox = if !uid.is_empty() {
+            graph.proximity_score(&uid.into(), &p).unwrap_or(0.0)
+        } else {
+            0.0
+        };
         types::FeedItem {
-            proximity_score: 0.0,
+            proximity_score: prox,
             relevance_score: if result.is_quality() { 1.0 } else { 0.0 },
             post: p,
         }
     };
-    let posts: Vec<types::FeedItem> = match platform {
+
+    let posts = match platform {
         "Instagram" => graph.get_feed(&types::Platform::Instagram, 20).map(|v| v.into_iter().map(wrap).collect()),
         "Twitter" => graph.get_feed(&types::Platform::Twitter, 20).map(|v| v.into_iter().map(wrap).collect()),
         "LinkedIn" => graph.get_feed(&types::Platform::LinkedIn, 20).map(|v| v.into_iter().map(wrap).collect()),
@@ -58,7 +68,6 @@ fn search_posts(state: State<AppState>, query: String, platform: Option<String>)
         "LinkedIn" => types::Platform::LinkedIn,
         _ => types::Platform::Twitter,
     });
-
     Ok(search.search_text(&query, platform.as_ref(), 20))
 }
 
@@ -70,13 +79,7 @@ fn store_credential(state: State<AppState>, platform: String, session_token: Str
         "LinkedIn" => types::Platform::LinkedIn,
         _ => return Err("unknown platform".into()),
     };
-
-    let cred = types::Credential {
-        platform: p,
-        session_token,
-        user_id,
-    };
-
+    let cred = types::Credential { platform: p, session_token, user_id };
     state.store.store_credential(&cred)
 }
 
@@ -147,6 +150,18 @@ fn get_messages(state: State<AppState>, conversation_id: String, platform: Strin
     graph.get_messages(&conversation_id, &p)
 }
 
+#[tauri::command]
+fn monitor_profile(state: State<AppState>, platform: String, _username: String) -> Result<(), String> {
+    let _p = match platform.as_str() {
+        "Instagram" => types::Platform::Instagram,
+        "Twitter" => types::Platform::Twitter,
+        "LinkedIn" => types::Platform::LinkedIn,
+        _ => return Err("unknown platform".into()),
+    };
+    let _graph = state.graph.lock().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -176,6 +191,7 @@ pub fn run() {
             analyze_post,
             get_conversations,
             get_messages,
+            monitor_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -291,7 +291,7 @@ impl PlatformIngester for InstagramIngester {
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
         let mut client = HttpClient::with_session(&credential.session_token);
-        let csrf = self.extract_csrf(&mut client).await?;
+        let _csrf = self.extract_csrf(&mut client).await?;
 
         let url = "https://www.instagram.com/api/v1/direct_v2/inbox/?persist_relay=true";
         let body = client.get_json(url, Some("https://www.instagram.com/direct/inbox/")).await?;

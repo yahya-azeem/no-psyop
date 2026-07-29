@@ -227,7 +227,7 @@ impl PlatformIngester for LinkedInIngester {
     }
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
-        let mut client = self.build_client(credential);
+        let client = self.build_client(credential);
         let csrf = self.csrf_token(credential);
 
         let url = format!(
@@ -242,18 +242,18 @@ impl PlatformIngester for LinkedInIngester {
         Ok(posts)
     }
 
-    async fn fetch_profile(&mut self, credential: &Credential, username: &str) -> Result<SocialUser, String> {
-        let mut client = self.build_client(credential);
+    async fn fetch_profile(&mut self, credential: &Credential, _username: &str) -> Result<SocialUser, String> {
+        let client = self.build_client(credential);
         let csrf = self.csrf_token(credential);
 
         let url = format!(
             "{}/identity/profiles/{}/profileView?csrfToken={}",
-            API_BASE, username, urlencoding::encode(&csrf)
+            API_BASE, _username, urlencoding::encode(&csrf)
         );
 
-        let mut followers_url = format!(
+        let followers_url = format!(
             "{}/identity/profiles/{}/connections?start=0&count=50&csrfToken={}",
-            API_BASE, username, urlencoding::encode(&csrf)
+            API_BASE, _username, urlencoding::encode(&csrf)
         );
 
         let body = client.get_json(&url, Some("https://www.linkedin.com/in/")).await?;
@@ -275,7 +275,7 @@ impl PlatformIngester for LinkedInIngester {
     }
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
-        let mut client = self.build_client(credential);
+        let client = self.build_client(credential);
         let csrf = self.csrf_token(credential);
 
         let url = format!(
@@ -291,7 +291,7 @@ impl PlatformIngester for LinkedInIngester {
     }
 
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
-        let mut client = self.build_client(credential);
+        let client = self.build_client(credential);
         let csrf = self.csrf_token(credential);
 
         let url = format!("{}/me?csrfToken={}", API_BASE, urlencoding::encode(&csrf));

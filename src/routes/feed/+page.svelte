@@ -4,11 +4,18 @@
   import type { FeedItem } from '$lib/types';
 
   let items = $derived($visiblePosts);
+  let searchQuery = $state('');
+  let searchResults = $state<string[]>([]);
+  let searching = $state(false);
+  let currentUserId = $state('');
 
   async function fetchFeed() {
     isFetching.set(true);
     try {
-      const result = await invoke<FeedItem[]>('get_feed', {});
+      const result = await invoke<FeedItem[]>('get_feed', {
+        userId: currentUserId || null,
+        platform: null,
+      });
       if (result.length === 0) {
         isCaughtUp.set(true);
       } else {
@@ -18,6 +25,21 @@
       console.error('fetch feed failed', e);
     } finally {
       isFetching.set(false);
+    }
+  }
+
+  async function doSearch() {
+    if (!searchQuery.trim()) return;
+    searching = true;
+    try {
+      searchResults = await invoke<string[]>('search_posts', {
+        query: searchQuery,
+        platform: null,
+      });
+    } catch (e) {
+      console.error('search failed', e);
+    } finally {
+      searching = false;
     }
   }
 
@@ -38,13 +60,39 @@
     <p class="feed-subtitle">curated posts from your networks</p>
   </div>
 
+  <div class="search-area">
+    <div class="search-row">
+      <input
+        type="text"
+        placeholder="Search your indexed posts…"
+        bind:value={searchQuery}
+        onkeydown={(e) => e.key === 'Enter' && doSearch()}
+        class="search-input"
+      />
+      <button class="btn btn-ghost" onclick={doSearch} disabled={searching || !searchQuery.trim()}>
+        {searching ? '…' : 'Search'}
+      </button>
+    </div>
+    {#if searchResults.length > 0}
+      <div class="search-results">
+        <span class="search-label">Found {searchResults.length} results</span>
+        <ul>
+          {#each searchResults as id}
+            <li class="search-hit">{id}</li>
+          {/each}
+        </ul>
+        <button class="btn btn-ghost btn-small" onclick={() => searchResults = []}>Clear</button>
+      </div>
+    {/if}
+  </div>
+
   <div class="feed-meta">
     <span class="feed-count">{items.length} items</span>
   </div>
 
   <div class="feed-actions">
     <button class="btn btn-primary" onclick={fetchFeed} disabled={$isFetching}>
-      {$isFetching ? 'Fetching...' : 'Refresh feed'}
+      {$isFetching ? 'Fetching…' : 'Refresh feed'}
     </button>
     <button class="btn btn-ghost" onclick={clearFeed}>Clear</button>
   </div>
@@ -58,13 +106,12 @@
     {/if}
 
     {#each items as item (item.post.id)}
-      <article class="post-card">
+      <article class="post-card" style="--prox-pct: {Math.min(item.proximity_score * 100, 100)}%">
         <div class="post-header">
           <span class="post-platform">{item.post.platform}</span>
           <span class="post-author">{item.post.author_username}</span>
           <span class="post-time">{formatTimestamp(item.post.timestamp)}</span>
         </div>
-
         <div class="post-body">
           <p class="post-content">{item.post.content}</p>
           {#if item.post.media_urls.length > 0}
@@ -75,11 +122,15 @@
             </div>
           {/if}
         </div>
-
         <div class="post-footer">
           <span class="post-score" title="Relevance score">
             {(item.relevance_score * 100).toFixed(0)}% match
           </span>
+          {#if item.proximity_score > 0}
+            <span class="post-prox" title="Social proximity">
+              {(item.proximity_score * 100).toFixed(0)}% proximity
+            </span>
+          {/if}
         </div>
       </article>
     {/each}
@@ -95,181 +146,45 @@
 </div>
 
 <style>
-  .feed-page {
-    max-width: var(--max-width);
-  }
-
-  .feed-header {
-    margin-bottom: 1.5rem;
-  }
-
-  .feed-title {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin: 0;
-    letter-spacing: -0.02em;
-  }
-
-  .feed-subtitle {
-    font-size: 0.85rem;
-    color: var(--fg-muted);
-    margin: 0.25rem 0 0 0;
-  }
-
-  .feed-meta {
-    margin-bottom: 1rem;
-  }
-
-  .feed-count {
-    font-size: 0.8rem;
-    color: var(--fg-muted);
-  }
-
-  .feed-actions {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1.5rem;
-  }
-
-  .btn {
-    padding: 0.5rem 1rem;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    font-size: 0.85rem;
-    transition: all 0.15s;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: white;
-    border-color: var(--accent);
-  }
-
-  .btn-primary:hover {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-ghost {
-    background: transparent;
-    color: var(--fg-muted);
-  }
-
-  .btn-ghost:hover {
-    background: var(--bg);
-    color: var(--fg);
-  }
-
-  .feed-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .feed-empty {
-    text-align: center;
-    padding: 3rem 0;
-    color: var(--fg-muted);
-  }
-
-  .feed-empty-hint {
-    font-size: 0.85rem;
-    margin-top: 0.5rem;
-  }
-
-  .post-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1rem;
-    filter: grayscale(100%);
-    transition: filter 0.2s;
-  }
-
-  .post-card:hover {
-    filter: grayscale(0%);
-  }
-
-  .post-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.75rem;
-    font-size: 0.8rem;
-  }
-
-  .post-platform {
-    font-weight: 600;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--accent);
-  }
-
-  .post-author {
-    color: var(--fg);
-    font-weight: 500;
-  }
-
-  .post-time {
-    margin-left: auto;
-    color: var(--fg-muted);
-  }
-
-  .post-body {
-    margin-bottom: 0.75rem;
-  }
-
-  .post-content {
-    margin: 0;
-    line-height: 1.6;
-    font-size: 0.95rem;
-  }
-
-  .post-media {
-    margin-top: 0.75rem;
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .post-media img {
-    width: 100%;
-    border-radius: var(--radius);
-  }
-
-  .post-footer {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    font-size: 0.78rem;
-  }
-
-  .post-score {
-    color: var(--fg-muted);
-  }
-
-  .feed-end {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding: 2rem 0;
-  }
-
-  .feed-end-line {
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-  }
-
-  .feed-end-text {
-    margin: 0;
-    font-size: 0.85rem;
-    color: var(--fg-muted);
-    white-space: nowrap;
-    font-style: italic;
-  }
+  .feed-page { max-width: var(--max-width); }
+  .feed-header { margin-bottom: 1.5rem; }
+  .feed-title { font-size: 1.5rem; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
+  .feed-subtitle { font-size: 0.85rem; color: var(--fg-muted); margin: 0.25rem 0 0 0; }
+  .search-area { margin-bottom: 1rem; }
+  .search-row { display: flex; gap: 0.5rem; }
+  .search-input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); color: var(--fg); font-size: 0.9rem; }
+  .search-results { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.85rem; }
+  .search-label { color: var(--fg-muted); font-size: 0.8rem; }
+  .search-results ul { margin: 0.25rem 0; padding-left: 1rem; }
+  .search-hit { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); }
+  .feed-meta { margin-bottom: 1rem; }
+  .feed-count { font-size: 0.8rem; color: var(--fg-muted); }
+  .feed-actions { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+  .btn { padding: 0.5rem 1rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.85rem; transition: all 0.15s; cursor: pointer; }
+  .btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-ghost { background: transparent; color: var(--fg-muted); }
+  .btn-ghost:hover { background: var(--bg); color: var(--fg); }
+  .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-small { padding: 0.25rem 0.6rem; font-size: 0.75rem; }
+  .feed-list { display: flex; flex-direction: column; gap: 1rem; }
+  .feed-empty { text-align: center; padding: 3rem 0; color: var(--fg-muted); }
+  .feed-empty-hint { font-size: 0.85rem; margin-top: 0.5rem; }
+  .post-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; filter: grayscale(100%); transition: filter 0.2s; }
+  .post-card:hover { filter: grayscale(0%); }
+  .post-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; font-size: 0.8rem; }
+  .post-platform { font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+  .post-author { color: var(--fg); font-weight: 500; }
+  .post-time { margin-left: auto; color: var(--fg-muted); }
+  .post-body { margin-bottom: 0.75rem; }
+  .post-content { margin: 0; line-height: 1.6; font-size: 0.95rem; }
+  .post-media { margin-top: 0.75rem; border-radius: var(--radius); overflow: hidden; }
+  .post-media img { width: 100%; border-radius: var(--radius); }
+  .post-footer { display: flex; align-items: center; gap: 0.75rem; font-size: 0.78rem; }
+  .post-score { color: var(--fg-muted); }
+  .post-prox { color: var(--fg-muted); }
+  .feed-end { display: flex; align-items: center; gap: 1rem; padding: 2rem 0; }
+  .feed-end-line { flex: 1; height: 1px; background: var(--border); }
+  .feed-end-text { margin: 0; font-size: 0.85rem; color: var(--fg-muted); white-space: nowrap; font-style: italic; }
 </style>
