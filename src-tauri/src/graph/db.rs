@@ -605,4 +605,72 @@ mod tests {
         let score = graph.calculate_proximity(&"user1".into(), &post_with_mutual).unwrap();
         assert!(score > 0.5, "mutual engagement should score high");
     }
+
+    #[test]
+    fn test_save_and_retrieve_post() {
+        let graph = SocialGraph::open("").unwrap();
+        let post = Post {
+            id: "p1".into(),
+            platform: Platform::Twitter,
+            author_id: "a1".into(),
+            author_username: "user1".into(),
+            content: "test content".into(),
+            media_urls: vec![],
+            liker_ids: vec!["u1".into(), "u2".into()],
+            commenter_ids: vec!["u1".into()],
+            timestamp: 1000,
+            is_video: false,
+            engagement_score: None,
+            is_synthetic: Some(false),
+            vector_embedding: None,
+        };
+        graph.save_post(&post).unwrap();
+        let posts = graph.get_posts_by_proximity(&Platform::Twitter, 10).unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, "p1");
+        assert_eq!(posts[0].liker_ids, vec!["u1".to_string(), "u2".to_string()]);
+    }
+
+    #[test]
+    fn test_save_post_filters_synthetic() {
+        let graph = SocialGraph::open("").unwrap();
+        let real = Post {
+            id: "p1".into(), platform: Platform::Instagram, author_id: "a1".into(),
+            author_username: "u1".into(), content: "real".into(), media_urls: vec![],
+            liker_ids: vec![], commenter_ids: vec![], timestamp: 1000,
+            is_video: false, engagement_score: None, is_synthetic: Some(false), vector_embedding: None,
+        };
+        let synth = Post {
+            id: "p2".into(), platform: Platform::Instagram, author_id: "a2".into(),
+            author_username: "u2".into(), content: "fake".into(), media_urls: vec![],
+            liker_ids: vec![], commenter_ids: vec![], timestamp: 1001,
+            is_video: false, engagement_score: None, is_synthetic: Some(true), vector_embedding: None,
+        };
+        graph.save_post(&real).unwrap();
+        graph.save_post(&synth).unwrap();
+        let posts = graph.get_posts_by_proximity(&Platform::Instagram, 10).unwrap();
+        assert_eq!(posts.len(), 1, "synthetic posts should be excluded from feed");
+        assert_eq!(posts[0].id, "p1");
+    }
+
+    #[test]
+    fn test_save_and_get_messages() {
+        let graph = SocialGraph::open("").unwrap();
+        let msg = crate::types::Message {
+            id: "m1".into(), platform: Platform::Twitter,
+            conversation_id: "conv1".into(), sender_id: "user1".into(),
+            content: "hello".into(), timestamp: 1000,
+        };
+        graph.save_message(&msg).unwrap();
+        let msgs = graph.get_messages("conv1", &Platform::Twitter).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "hello");
+    }
+
+    #[test]
+    fn test_get_empty_conversation() {
+        let graph = SocialGraph::open("").unwrap();
+        let msgs = graph.get_messages("nonexistent", &Platform::LinkedIn).unwrap();
+        assert!(msgs.is_empty());
+    }
 }

@@ -19,6 +19,19 @@
   --max-width: 680px;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a;
+    --bg-card: #242424;
+    --fg: #e0e0e0;
+    --fg-muted: #888888;
+    --border: #333333;
+    --accent: #5a8fc9;
+    --accent-hover: #6fa8e0;
+    --danger: #d47070;
+  }
+}
+
 html {
   font-size: 15px;
   -webkit-text-size-adjust: 100%;

@@ -148,3 +148,55 @@ impl NGramModel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_text_not_synthetic() {
+        let d = SyntheticDetector::new();
+        assert!(!d.classify(""));
+        assert!(d.score("") < 0.5);
+    }
+
+    #[test]
+    fn test_short_text_not_synthetic() {
+        let d = SyntheticDetector::new();
+        assert!(!d.classify("hello world"));
+    }
+
+    #[test]
+    fn test_natural_text_low_score() {
+        let d = SyntheticDetector::new();
+        let text = "hey guys just got back from the store and they were totally out of milk can you believe it";
+        assert!(d.score(text) < 0.7);
+    }
+
+    #[test]
+    fn test_repetitive_text_high_penalty() {
+        let d = SyntheticDetector::new();
+        let text = "great post thanks for sharing great post thanks for sharing great post thanks for sharing great post thanks for sharing";
+        let score = d.score(text);
+        assert!(score > 0.3, "repetition should increase score, got {}", score);
+    }
+
+    #[test]
+    fn test_formal_markers_increase_score() {
+        let d = SyntheticDetector::new();
+        let text = "It should be noted that research shows data suggests therefore consequently furthermore this is clearly a significant finding that notably demonstrates the aforementioned phenomenon.";
+        assert!(d.formality_score(text) > 0.3);
+    }
+
+    #[test]
+    fn test_entropy_bounds() {
+        let d = SyntheticDetector::new();
+        let balanced = "ab";
+        let skewed = "aaaaaaaab";
+        let high_e = d.entropy_score(balanced);
+        let low_e = d.entropy_score(skewed);
+        assert!(high_e > low_e, "balanced text should have higher entropy, got {} <= {}", high_e, low_e);
+        assert!(high_e <= 1.0);
+        assert!(low_e >= 0.0);
+    }
+}

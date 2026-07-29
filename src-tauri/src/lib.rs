@@ -11,6 +11,7 @@ mod search;
 
 use std::sync::Mutex;
 use tauri::State;
+use ingestion::PlatformIngester;
 
 struct AppState {
     graph: Mutex<graph::GraphEngine>,
@@ -151,15 +152,88 @@ fn get_messages(state: State<AppState>, conversation_id: String, platform: Strin
 }
 
 #[tauri::command]
-fn monitor_profile(state: State<AppState>, platform: String, _username: String) -> Result<(), String> {
-    let _p = match platform.as_str() {
+async fn monitor_profile(state: State<'_, AppState>, platform: String, username: String) -> Result<types::SocialUser, String> {
+    let p = match platform.as_str() {
         "Instagram" => types::Platform::Instagram,
         "Twitter" => types::Platform::Twitter,
         "LinkedIn" => types::Platform::LinkedIn,
         _ => return Err("unknown platform".into()),
     };
-    let _graph = state.graph.lock().map_err(|e| e.to_string())?;
-    Ok(())
+    let cred = state.store.get_credential(&p)?
+        .ok_or_else(|| format!("No credential for {}", platform))?;
+
+    let profile = match p {
+        types::Platform::Instagram => {
+            let mut ing = ingestion::instagram::InstagramIngester;
+            ing.fetch_profile(&cred, &username).await?
+        }
+        types::Platform::Twitter => {
+            let mut ing = ingestion::twitter::TwitterIngester;
+            ing.fetch_profile(&cred, &username).await?
+        }
+        types::Platform::LinkedIn => {
+            let mut ing = ingestion::linkedin::LinkedInIngester;
+            ing.fetch_profile(&cred, &username).await?
+        }
+    };
+
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.sync_user(profile.clone())?;
+    Ok(profile)
+}
+
+#[tauri::command]
+async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, String> {
+    let creds = {
+        let store = &state.store;
+        let mut all = Vec::new();
+        for p in &[types::Platform::Instagram, types::Platform::Twitter, types::Platform::LinkedIn] {
+            if let Ok(Some(cred)) = store.get_credential(p) {
+                all.push(cred);
+            }
+        }
+        all
+    };
+
+    if creds.is_empty() {
+        return Err("No credentials configured. Connect a platform in Settings first.".into());
+    }
+
+    let mut engine = ingestion::IngestionEngine::new();
+    let results = engine.fetch_all_feeds(&creds).await;
+
+    let mut posts_added = 0usize;
+    let mut errors = Vec::new();
+
+    for (platform, result) in &results {
+        match result {
+            Ok(posts) => {
+                if let Ok(graph) = state.graph.lock() {
+                    for post in posts {
+                        if let Err(e) = graph.save_post(post) {
+                            errors.push(format!("{:?}: save post {}: {}", platform, post.id, e));
+                        } else {
+                            posts_added += 1;
+                        }
+                    }
+                }
+                if let Ok(mut search) = state.search.lock() {
+                    for post in posts {
+                        search.index_post(post);
+                    }
+                }
+            }
+            Err(e) => {
+                errors.push(format!("{:?}: {}", platform, e));
+            }
+        }
+    }
+
+    Ok(types::SyncResult {
+        posts_added,
+        messages_added: 0,
+        errors,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -192,6 +266,7 @@ pub fn run() {
             get_conversations,
             get_messages,
             monitor_profile,
+            sync_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -153,3 +153,62 @@ impl BaitClassifier {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clickbait_high_score() {
+        let c = BaitClassifier::new();
+        let text = "You won't believe what happened next! This SHOCKING truth will change everything!!! OMG absolutely incredible jaw-dropping disaster!";
+        let score = c.score(text);
+        assert!(score > 0.5, "clickbait should score high, got {}", score);
+    }
+
+    #[test]
+    fn test_factual_text_low_score() {
+        let c = BaitClassifier::new();
+        let text = "According to a report published in the Journal of Climate Studies, researchers from Stanford University found that global temperatures increased by 1.2 degrees Celsius over the past decade. The study analyzed data from 5,000 weather stations worldwide.";
+        let score = c.score(text);
+        assert!(score < 0.5, "factual text should score low, got {}", score);
+    }
+
+    #[test]
+    fn test_empty_text_low_score() {
+        let c = BaitClassifier::new();
+        assert!(c.score("") < 0.3);
+    }
+
+    #[test]
+    fn test_subjectivity_detection() {
+        let c = BaitClassifier::new();
+        let subj = "This mind-blowing unbelievable disaster will destroy everything you know!";
+        let neutral = "The meeting is scheduled for 3 PM tomorrow.";
+        assert!(c.subjectivity_score(subj) > c.subjectivity_score(neutral));
+    }
+
+    #[test]
+    fn test_factual_specificity_with_data() {
+        let c = BaitClassifier::new();
+        let with_data = "According to the study published in Nature, 73% of participants reported improvement. Source: WHO data.";
+        let vague = "Some people say it might be good.";
+        assert!(c.factual_specificity(with_data) > c.factual_specificity(vague));
+    }
+
+    #[test]
+    fn test_deception_patterns_exclamations() {
+        let c = BaitClassifier::new();
+        let shouty = "AMAZING!!! INCREDIBLE!!! YOU WON'T BELIEVE THIS!!!";
+        let normal = "Here is the update you requested.";
+        assert!(c.deception_patterns(shouty) > c.deception_patterns(normal));
+    }
+
+    #[test]
+    fn test_lexical_density() {
+        let c = BaitClassifier::new();
+        let dense = "photosynthesis cellular mitochondria chloroplast adenosine triphosphate";
+        let sparse = "it is a very good thing to have and to be in the of for";
+        assert!(c.lexical_density(dense) > c.lexical_density(sparse));
+    }
+}

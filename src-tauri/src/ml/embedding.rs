@@ -67,3 +67,48 @@ impl FallbackEmbedder {
         vec
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_embed_dimension() {
+        let e = FallbackEmbedder::new(384);
+        let v = e.embed("hello world");
+        assert_eq!(v.len(), 384);
+    }
+
+    #[test]
+    fn test_empty_text_returns_zeros() {
+        let e = FallbackEmbedder::new(4);
+        let v = e.embed("");
+        assert_eq!(v, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn test_identical_texts_same_embedding() {
+        let e = FallbackEmbedder::new(32);
+        let a = e.embed("halal food dallas");
+        let b = e.embed("halal food dallas");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_similar_texts_have_positive_similarity() {
+        let e = FallbackEmbedder::new(384);
+        let a = e.embed("dallas food");
+        let b = e.embed("food in dallas");
+        let sim = crate::search::vector::cosine_similarity(&a, &b);
+        assert!(sim > 0.1, "similar texts should have positive similarity, got {}", sim);
+    }
+
+    #[test]
+    fn test_different_texts_lower_similarity() {
+        let e = FallbackEmbedder::new(384);
+        let a = e.embed("dallas food halal");
+        let b = e.embed("xxxx");
+        let sim = crate::search::vector::cosine_similarity(&a, &b);
+        assert!(sim < 0.5, "different texts should have low similarity, got {}", sim);
+    }
+}

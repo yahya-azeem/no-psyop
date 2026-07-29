@@ -7,13 +7,30 @@
   let searchQuery = $state('');
   let searchResults = $state<string[]>([]);
   let searching = $state(false);
-  let currentUserId = $state('');
+  let syncing = $state(false);
+  let syncMsg = $state('');
+
+  async function doSync() {
+    syncing = true;
+    syncMsg = '';
+    try {
+      const result = await invoke('sync_all');
+      syncMsg = `Synced ${result.posts_added} posts.`;
+      if (result.errors.length > 0) {
+        syncMsg += ` Errors: ${result.errors.join('; ')}`;
+      }
+    } catch (e) {
+      syncMsg = `Sync failed: ${e}`;
+    } finally {
+      syncing = false;
+    }
+  }
 
   async function fetchFeed() {
     isFetching.set(true);
     try {
       const result = await invoke<FeedItem[]>('get_feed', {
-        userId: currentUserId || null,
+        userId: null,
         platform: null,
       });
       if (result.length === 0) {
@@ -60,11 +77,15 @@
     <p class="feed-subtitle">curated posts from your networks</p>
   </div>
 
+  {#if syncMsg}
+    <div class="sync-bar">{syncMsg}</div>
+  {/if}
+
   <div class="search-area">
     <div class="search-row">
       <input
         type="text"
-        placeholder="Search your indexed posts…"
+        placeholder="Search indexed posts…"
         bind:value={searchQuery}
         onkeydown={(e) => e.key === 'Enter' && doSearch()}
         class="search-input"
@@ -91,8 +112,11 @@
   </div>
 
   <div class="feed-actions">
-    <button class="btn btn-primary" onclick={fetchFeed} disabled={$isFetching}>
-      {$isFetching ? 'Fetching…' : 'Refresh feed'}
+    <button class="btn btn-primary" onclick={doSync} disabled={syncing}>
+      {syncing ? 'Syncing…' : 'Sync now'}
+    </button>
+    <button class="btn btn-ghost" onclick={fetchFeed} disabled={$isFetching}>
+      {$isFetching ? 'Loading…' : 'Refresh feed'}
     </button>
     <button class="btn btn-ghost" onclick={clearFeed}>Clear</button>
   </div>
@@ -101,12 +125,12 @@
     {#if items.length === 0 && !$isFetching}
       <div class="feed-empty">
         <p>No posts yet.</p>
-        <p class="feed-empty-hint">Connect your accounts in Settings, then fetch your feed.</p>
+        <p class="feed-empty-hint">Connect your accounts in Settings, then click Sync now.</p>
       </div>
     {/if}
 
     {#each items as item (item.post.id)}
-      <article class="post-card" style="--prox-pct: {Math.min(item.proximity_score * 100, 100)}%">
+      <article class="post-card">
         <div class="post-header">
           <span class="post-platform">{item.post.platform}</span>
           <span class="post-author">{item.post.author_username}</span>
@@ -123,13 +147,9 @@
           {/if}
         </div>
         <div class="post-footer">
-          <span class="post-score" title="Relevance score">
-            {(item.relevance_score * 100).toFixed(0)}% match
-          </span>
+          <span class="post-score">{(item.relevance_score * 100).toFixed(0)}% match</span>
           {#if item.proximity_score > 0}
-            <span class="post-prox" title="Social proximity">
-              {(item.proximity_score * 100).toFixed(0)}% proximity
-            </span>
+            <span class="post-prox">{(item.proximity_score * 100).toFixed(0)}% proximity</span>
           {/if}
         </div>
       </article>
@@ -138,7 +158,7 @@
     {#if $isCaughtUp}
       <div class="feed-end">
         <div class="feed-end-line"></div>
-        <p class="feed-end-text">You are all caught up.</p>
+        <p class="feed-end-text">you are all caught up</p>
         <div class="feed-end-line"></div>
       </div>
     {/if}
@@ -150,6 +170,7 @@
   .feed-header { margin-bottom: 1.5rem; }
   .feed-title { font-size: 1.5rem; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
   .feed-subtitle { font-size: 0.85rem; color: var(--fg-muted); margin: 0.25rem 0 0 0; }
+  .sync-bar { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.5rem 0.75rem; font-size: 0.85rem; margin-bottom: 1rem; }
   .search-area { margin-bottom: 1rem; }
   .search-row { display: flex; gap: 0.5rem; }
   .search-input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); color: var(--fg); font-size: 0.9rem; }
@@ -159,7 +180,7 @@
   .search-hit { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); }
   .feed-meta { margin-bottom: 1rem; }
   .feed-count { font-size: 0.8rem; color: var(--fg-muted); }
-  .feed-actions { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+  .feed-actions { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
   .btn { padding: 0.5rem 1rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.85rem; transition: all 0.15s; cursor: pointer; }
   .btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
   .btn-primary:hover { background: var(--accent-hover); }
