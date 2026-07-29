@@ -69,6 +69,11 @@ impl GraphEngine {
         db.get_conversations(platform).map_err(|e| e.to_string())
     }
 
+    pub fn get_all_conversations(&self) -> Result<Vec<Conversation>, String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        db.get_all_conversations().map_err(|e| e.to_string())
+    }
+
     pub fn get_messages(&self, conversation_id: &str, platform: &Platform) -> Result<Vec<Message>, String> {
         let db = self.db.lock().map_err(|e| e.to_string())?;
         db.get_messages(conversation_id, platform).map_err(|e| e.to_string())

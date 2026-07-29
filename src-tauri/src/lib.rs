@@ -128,15 +128,20 @@ fn analyze_post(state: State<AppState>, content: String) -> Result<ml::PostFilte
 }
 
 #[tauri::command]
-fn get_conversations(state: State<AppState>, platform: String) -> Result<Vec<types::Conversation>, String> {
+fn get_conversations(state: State<AppState>, platform: Option<String>) -> Result<Vec<types::Conversation>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let p = match platform.as_str() {
-        "Instagram" => types::Platform::Instagram,
-        "Twitter" => types::Platform::Twitter,
-        "LinkedIn" => types::Platform::LinkedIn,
-        _ => return Err("unknown platform".into()),
-    };
-    graph.get_conversations(&p)
+    match platform {
+        Some(p) => {
+            let p = match p.as_str() {
+                "Instagram" => types::Platform::Instagram,
+                "Twitter" => types::Platform::Twitter,
+                "LinkedIn" => types::Platform::LinkedIn,
+                _ => return Err("unknown platform".into()),
+            };
+            graph.get_conversations(&p)
+        }
+        None => graph.get_all_conversations(),
+    }
 }
 
 #[tauri::command]
@@ -149,6 +154,14 @@ fn get_messages(state: State<AppState>, conversation_id: String, platform: Strin
         _ => return Err("unknown platform".into()),
     };
     graph.get_messages(&conversation_id, &p)
+}
+
+#[tauri::command]
+async fn search_instagram(state: State<'_, AppState>, query: String) -> Result<Vec<types::Post>, String> {
+    let cred = state.store.get_credential(&types::Platform::Instagram)?
+        .ok_or_else(|| "Instagram not connected".to_string())?;
+    let mut ing = ingestion::instagram::InstagramIngester;
+    ing.search_posts(&cred, &query).await
 }
 
 #[tauri::command]
@@ -267,6 +280,7 @@ pub fn run() {
             get_messages,
             monitor_profile,
             sync_all,
+            search_instagram,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -351,6 +351,32 @@ impl SocialGraph {
 
         msgs.collect()
     }
+
+    pub fn get_all_conversations(&self) -> Result<Vec<crate::types::Conversation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, platform, participants, last_message_at, unread
+             FROM conversations
+             ORDER BY last_message_at DESC"
+        )?;
+
+        let convs = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let plat_int: i32 = row.get(1)?;
+            let participants_str: String = row.get(2)?;
+            let last_message_at: u64 = row.get(3)?;
+            let unread: i32 = row.get(4)?;
+
+            Ok(crate::types::Conversation {
+                id,
+                platform: int_to_platform(plat_int),
+                participants: serde_json::from_str(&participants_str).unwrap_or_default(),
+                last_message_at,
+                unread: unread != 0,
+            })
+        })?;
+
+        convs.collect()
+    }
 }
 
 fn platform_to_int(p: &Platform) -> i32 {

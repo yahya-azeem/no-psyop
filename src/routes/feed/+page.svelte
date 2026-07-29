@@ -10,6 +10,10 @@
   let syncing = $state(false);
   let syncMsg = $state('');
 
+  let igQuery = $state('');
+  let igResults = $state<FeedItem[]>([]);
+  let igSearching = $state(false);
+
   async function doSync() {
     syncing = true;
     syncMsg = '';
@@ -60,6 +64,24 @@
     }
   }
 
+  async function doIgSearch() {
+    if (!igQuery.trim()) return;
+    igSearching = true;
+    igResults = [];
+    try {
+      const posts = await invoke<any[]>('search_instagram', { query: igQuery });
+      igResults = posts.map((p: any) => ({
+        post: p,
+        proximity_score: 0,
+        relevance_score: 1,
+      }));
+    } catch (e) {
+      console.error('ig search failed', e);
+    } finally {
+      igSearching = false;
+    }
+  }
+
   function formatTimestamp(ts: number) {
     const d = new Date(ts * 1000);
     const now = Date.now();
@@ -81,32 +103,6 @@
     <div class="sync-bar">{syncMsg}</div>
   {/if}
 
-  <div class="search-area">
-    <div class="search-row">
-      <input
-        type="text"
-        placeholder="Search indexed posts…"
-        bind:value={searchQuery}
-        onkeydown={(e) => e.key === 'Enter' && doSearch()}
-        class="search-input"
-      />
-      <button class="btn btn-ghost" onclick={doSearch} disabled={searching || !searchQuery.trim()}>
-        {searching ? '…' : 'Search'}
-      </button>
-    </div>
-    {#if searchResults.length > 0}
-      <div class="search-results">
-        <span class="search-label">Found {searchResults.length} results</span>
-        <ul>
-          {#each searchResults as id}
-            <li class="search-hit">{id}</li>
-          {/each}
-        </ul>
-        <button class="btn btn-ghost btn-small" onclick={() => searchResults = []}>Clear</button>
-      </div>
-    {/if}
-  </div>
-
   <div class="feed-meta">
     <span class="feed-count">{items.length} items</span>
   </div>
@@ -120,6 +116,80 @@
     </button>
     <button class="btn btn-ghost" onclick={clearFeed}>Clear</button>
   </div>
+
+  <details class="search-section">
+    <summary class="search-summary">Search indexed posts</summary>
+    <div class="search-area">
+      <div class="search-row">
+        <input
+          type="text"
+          placeholder="Search indexed posts…"
+          bind:value={searchQuery}
+          onkeydown={(e) => e.key === 'Enter' && doSearch()}
+          class="search-input"
+        />
+        <button class="btn btn-ghost" onclick={doSearch} disabled={searching || !searchQuery.trim()}>
+          {searching ? '…' : 'Search'}
+        </button>
+      </div>
+      {#if searchResults.length > 0}
+        <div class="search-results">
+          <span class="search-label">Found {searchResults.length} results</span>
+          <ul>
+            {#each searchResults as id}
+              <li class="search-hit">{id}</li>
+            {/each}
+          </ul>
+          <button class="btn btn-ghost btn-small" onclick={() => searchResults = []}>Clear</button>
+        </div>
+      {/if}
+    </div>
+  </details>
+
+  <details class="search-section">
+    <summary class="search-summary">Instagram discovery</summary>
+    <div class="search-area">
+      <div class="search-row">
+        <input
+          type="text"
+          placeholder="Search Instagram for anything…"
+          bind:value={igQuery}
+          onkeydown={(e) => e.key === 'Enter' && doIgSearch()}
+          class="search-input"
+        />
+        <button class="btn btn-ghost" onclick={doIgSearch} disabled={igSearching || !igQuery.trim()}>
+          {igSearching ? '…' : 'Search IG'}
+        </button>
+      </div>
+      {#if igResults.length > 0}
+        <div class="ig-results">
+          {#each igResults as item (item.post.id)}
+            <article class="post-card ig-card">
+              <div class="post-header">
+                <span class="post-platform">Instagram</span>
+                <span class="post-author">{item.post.author_username}</span>
+                <span class="post-time">{formatTimestamp(item.post.timestamp)}</span>
+              </div>
+              <div class="post-body">
+                <p class="post-content">{item.post.content}</p>
+                {#if item.post.media_urls.length > 0}
+                  <div class="post-media">
+                    {#each item.post.media_urls as url}
+                      {#if item.post.is_video}
+                        <video src={url} controls class="video-player" />
+                      {:else}
+                        <img src={url} alt="media" loading="lazy" />
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </details>
 
   <div class="feed-list">
     {#if items.length === 0 && !$isFetching}
@@ -141,7 +211,11 @@
           {#if item.post.media_urls.length > 0}
             <div class="post-media">
               {#each item.post.media_urls as url}
-                <img src={url} alt="media" loading="lazy" />
+                {#if item.post.is_video}
+                  <video src={url} controls class="video-player" />
+                {:else}
+                  <img src={url} alt="media" loading="lazy" />
+                {/if}
               {/each}
             </div>
           {/if}
@@ -171,10 +245,13 @@
   .feed-title { font-size: 1.5rem; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
   .feed-subtitle { font-size: 0.85rem; color: var(--fg-muted); margin: 0.25rem 0 0 0; }
   .sync-bar { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.5rem 0.75rem; font-size: 0.85rem; margin-bottom: 1rem; }
-  .search-area { margin-bottom: 1rem; }
+  .search-section { margin-bottom: 1rem; }
+  .search-summary { cursor: pointer; font-size: 0.85rem; color: var(--accent); font-weight: 500; padding: 0.25rem 0; }
+  .search-area { padding: 0.5rem 0; }
   .search-row { display: flex; gap: 0.5rem; }
   .search-input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); color: var(--fg); font-size: 0.9rem; }
-  .search-results { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.85rem; }
+  .search-results, .ig-results { margin-top: 0.5rem; }
+  .search-results { padding: 0.5rem 0.75rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.85rem; }
   .search-label { color: var(--fg-muted); font-size: 0.8rem; }
   .search-results ul { margin: 0.25rem 0; padding-left: 1rem; }
   .search-hit { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); }
@@ -194,6 +271,7 @@
   .feed-empty-hint { font-size: 0.85rem; margin-top: 0.5rem; }
   .post-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; filter: grayscale(100%); transition: filter 0.2s; }
   .post-card:hover { filter: grayscale(0%); }
+  .post-card.ig-card { filter: none; }
   .post-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; font-size: 0.8rem; }
   .post-platform { font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
   .post-author { color: var(--fg); font-weight: 500; }
@@ -201,7 +279,8 @@
   .post-body { margin-bottom: 0.75rem; }
   .post-content { margin: 0; line-height: 1.6; font-size: 0.95rem; }
   .post-media { margin-top: 0.75rem; border-radius: var(--radius); overflow: hidden; }
-  .post-media img { width: 100%; border-radius: var(--radius); }
+  .post-media :is(img, video) { width: 100%; border-radius: var(--radius); display: block; }
+  .video-player { max-height: 500px; background: #000; }
   .post-footer { display: flex; align-items: center; gap: 0.75rem; font-size: 0.78rem; }
   .post-score { color: var(--fg-muted); }
   .post-prox { color: var(--fg-muted); }

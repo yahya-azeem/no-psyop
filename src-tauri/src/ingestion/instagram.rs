@@ -213,6 +213,112 @@ impl InstagramIngester {
         ids
     }
 
+    pub async fn search_posts(&mut self, credential: &Credential, query: &str) -> Result<Vec<Post>, String> {
+        let token = ensure_sessionid_prefix(&credential.session_token);
+        let client = HttpClient::with_session(&token);
+
+        let encoded = urlencoding(query);
+        let url = format!("https://www.instagram.com/web/search/topsearch/?query={}", encoded);
+        let resp = client.client()
+            .get(&url)
+            .header("X-IG-App-ID", "936619743392459")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", "https://www.instagram.com/explore/search/")
+            .send()
+            .await
+            .map_err(|e| format!("http: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| format!("body: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>()));
+        }
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("json: {} (body: {})", e, text.chars().take(200).collect::<String>()))?;
+
+        let mut posts = Vec::new();
+        let mut usernames: Vec<String> = Vec::new();
+        let mut hashtags: Vec<String> = Vec::new();
+
+        if let Some(users) = body["users"].as_array() {
+            for u in users {
+                if let Some(user) = u["user"].as_object() {
+                    if let Some(pk) = user.get("pk").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) {
+                        usernames.push(pk.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some(tags) = body["hashtags"].as_array() {
+            for t in tags {
+                if let Some(tag) = t["hashtag"].as_object() {
+                    if let Some(name) = tag.get("name").and_then(|v| v.as_str()) {
+                        hashtags.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut seen_ids = std::collections::HashSet::new();
+        for tag in &hashtags {
+            if posts.len() >= 30 { break; }
+            let tag_url = format!("https://www.instagram.com/api/v1/tags/{}/sections/", tag);
+            let payload = serde_json::json!({
+                "surface": "grid",
+                "tab": "recent",
+                "page_type": "tags",
+                "include_persistent": true,
+            });
+            if let Ok(resp) = client.client()
+                .post(&tag_url)
+                .json(&payload)
+                .header("X-IG-App-ID", "936619743392459")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Content-Type", "application/json")
+                .header("Referer", "https://www.instagram.com/explore/tags/")
+                .send()
+                .await
+            {
+                if let Ok(t) = resp.text().await {
+                    if let Ok(tag_body) = serde_json::from_str::<serde_json::Value>(&t) {
+                        for section in tag_body["sections"].as_array().unwrap_or(&vec![]) {
+                            for item in section["layout_content"]["medias"].as_array().unwrap_or(&vec![]) {
+                                if let Some(m) = item.get("media") {
+                                    if let Some(pid) = m["pk"].as_i64().or(m["id"].as_i64()).map(|i| i.to_string()) {
+                                        if !seen_ids.insert(pid.clone()) { continue; }
+                                        let text = m["caption"]["text"].as_str().unwrap_or("").to_string();
+                                        let author_id = m["user"]["pk"].as_i64().map(|i| i.to_string()).unwrap_or_default();
+                                        let author_username = m["user"]["username"].as_str().unwrap_or("").to_string();
+                                        let ts = m["taken_at"].as_i64().unwrap_or(0) as u64;
+                                        let is_video = m["media_type"].as_i64() == Some(3) || m["is_video"].as_bool().unwrap_or(false);
+                                        let mut media_urls = Vec::new();
+                                        if is_video {
+                                            if let Some(src) = m["video_versions"].as_array().and_then(|v| v.first()).and_then(|v| v["url"].as_str()) {
+                                                media_urls.push(src.to_string());
+                                            }
+                                        } else {
+                                            if let Some(src) = m["image_versions2"]["candidates"].as_array().and_then(|c| c.first()).and_then(|c| c["url"].as_str()) {
+                                                media_urls.push(src.to_string());
+                                            }
+                                        }
+                                        posts.push(Post {
+                                            id: pid, platform: Platform::Instagram,
+                                            author_id, author_username, content: text,
+                                            media_urls, liker_ids: vec![], commenter_ids: vec![],
+                                            timestamp: ts, is_video,
+                                            engagement_score: None, is_synthetic: None, vector_embedding: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(posts)
+    }
+
     async fn fetch_graphql(&self, client: &HttpClient, query_hash: &str, variables: &serde_json::Value) -> Result<serde_json::Value, String> {
         let vars = serde_json::to_string(variables).map_err(|e| e.to_string())?;
         let url = format!(
@@ -343,11 +449,25 @@ impl PlatformIngester for InstagramIngester {
     }
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
-        let mut client = HttpClient::with_session(&credential.session_token);
-        let _csrf = self.extract_csrf(&mut client).await?;
+        let token = ensure_sessionid_prefix(&credential.session_token);
+        let client = HttpClient::with_session(&token);
+        let _csrf = self.extract_csrf(&client).await.unwrap_or_default();
 
         let url = "https://www.instagram.com/api/v1/direct_v2/inbox/?persist_relay=true";
-        let body = client.get_json(url, Some("https://www.instagram.com/direct/inbox/")).await?;
+        let resp = client.client()
+            .get(url)
+            .header("X-IG-App-ID", "936619743392459")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", "https://www.instagram.com/direct/inbox/")
+            .send()
+            .await
+            .map_err(|e| format!("http: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| format!("body: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("HTTP {}: {} (url: {})", status.as_u16(), text.chars().take(200).collect::<String>(), url));
+        }
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("json: {} (body: {})", e, text.chars().take(200).collect::<String>()))?;
 
         let mut msgs = Vec::new();
         if let Some(threads) = body["inbox"]["threads"].as_array() {
