@@ -230,33 +230,68 @@ impl PlatformIngester for InstagramIngester {
     }
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
-        let mut client = HttpClient::with_session(&credential.session_token);
+        let client = HttpClient::with_session(&credential.session_token);
 
-        let feed_query_hash = "485b270a140e96e6baf6e36cdf20aa3c";
-        let variables = serde_json::json!({
-            "fetch_media_item_count": 12,
-            "fetch_media_item_cursor": "",
-            "fetch_comment_count": 4,
-            "fetch_like_count": 4,
-            "has_stories": false,
-        });
+        let url = "https://www.instagram.com/api/v1/feed/timeline/?count=12";
+        let body = client.get_json(url, Some("https://www.instagram.com/")).await?;
 
-        let body = self.fetch_graphql(&mut client, feed_query_hash, &variables).await?;
+        let mut posts = Vec::new();
+        if let Some(feed_items) = body["feed_items"].as_array().or(body["items"].as_array()) {
+            for item in feed_items {
+                let media = item.get("media_or_ad")
+                    .or_else(|| item.get("media"))
+                    .or_else(|| item.get("image"))
+                    .or_else(|| item.get("video"));
+                let m = match media {
+                    Some(m) => m,
+                    None => {
+                        if let Some(m) = item.get("carousel_media") {
+                            m
+                        } else {
+                            continue;
+                        }
+                    }
+                };
 
-        let mut posts = self.parse_feed_items(&body);
+                let id = m["id"].as_str().or(item["id"].as_str()).unwrap_or("").to_string();
+                if id.is_empty() { continue; }
 
-        let reels_query_hash = "b3055c01b4b222b8a508dc29812deb77";
-        let reels_vars = serde_json::json!({
-            "reel_ids": [credential.user_id],
-            "tag_names": [],
-            "location_ids": [],
-            "highlight_reel_ids": [],
-            "precomposed_overlay": false,
-            "show_story_viewer_list": false,
-        });
+                let _code = m["code"].as_str().or(item["code"].as_str()).unwrap_or("").to_string();
+                let text = m["caption"]["text"].as_str()
+                    .or_else(|| item["caption"]["text"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let user = m["user"].as_object().or_else(|| item["user"].as_object());
+                let author_id = user.and_then(|u| u["pk"].as_i64().or(u["id"].as_i64())).map(|i| i.to_string()).unwrap_or_default();
+                let author_username = user.and_then(|u| u["username"].as_str()).unwrap_or("").to_string();
+                let ts = m["taken_at"].as_i64().or(item["taken_at"].as_i64()).unwrap_or(0) as u64;
+                let is_video = m["media_type"].as_i64() == Some(3) || m["is_video"].as_bool().unwrap_or(false);
 
-        if let Ok(stories_body) = self.fetch_graphql(&mut client, reels_query_hash, &reels_vars).await {
-            posts.extend(self.parse_feed_items(&stories_body));
+                let mut media_urls = Vec::new();
+                if is_video {
+                    if let Some(src) = m["video_versions"].as_array().and_then(|v| v.first()).and_then(|v| v["url"].as_str()) {
+                        media_urls.push(src.to_string());
+                    }
+                } else {
+                    if let Some(src) = m["image_versions2"]["candidates"].as_array().and_then(|c| c.first()).and_then(|c| c["url"].as_str()) {
+                        media_urls.push(src.to_string());
+                    }
+                }
+
+                let likers: Vec<String> = m["like_count"].as_i64().map(|_| vec![]).unwrap_or_default();
+                let commenters: Vec<String> = m["comment_count"].as_i64().map(|_| vec![]).unwrap_or_default();
+
+                posts.push(Post {
+                    id, platform: Platform::Instagram,
+                    author_id, author_username,
+                    content: text,
+                    media_urls, liker_ids: likers, commenter_ids: commenters,
+                    timestamp: ts, is_video,
+                    engagement_score: None,
+                    is_synthetic: None,
+                    vector_embedding: None,
+                });
+            }
         }
 
         Ok(posts)
