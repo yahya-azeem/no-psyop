@@ -230,10 +230,28 @@ impl PlatformIngester for InstagramIngester {
     }
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
-        let client = HttpClient::with_session(&credential.session_token);
+        let token = ensure_sessionid_prefix(&credential.session_token);
+        let client = HttpClient::with_session(&token);
 
+        let csrf = self.extract_csrf(&client).await.unwrap_or_default();
         let url = "https://www.instagram.com/api/v1/feed/timeline/?count=12";
-        let body = client.get_json(url, Some("https://www.instagram.com/")).await?;
+
+        let _ = &client;
+        let _ = &csrf;
+        let resp = client.client()
+            .get(url)
+            .header("X-IG-App-ID", "936619743392459")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", "https://www.instagram.com/")
+            .send()
+            .await
+            .map_err(|e| format!("http: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| format!("body: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("HTTP {}: {} (url: {})", status.as_u16(), text.chars().take(200).collect::<String>(), url));
+        }
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("json: {} (body: {})", e, text.chars().take(200).collect::<String>()))?;
 
         let mut posts = Vec::new();
         if let Some(feed_items) = body["feed_items"].as_array().or(body["items"].as_array()) {
@@ -385,6 +403,14 @@ impl PlatformIngester for InstagramIngester {
         }
 
         Ok(credential.clone())
+    }
+}
+
+pub fn ensure_sessionid_prefix(token: &str) -> String {
+    if token.trim().starts_with("sessionid=") || token.trim().starts_with("sessionid%3D") {
+        token.to_string()
+    } else {
+        format!("sessionid={}", token)
     }
 }
 

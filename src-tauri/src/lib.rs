@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-mod types;
+pub mod types;
 mod store;
 mod graph;
-mod http;
-mod ingestion;
+pub mod http;
+pub mod ingestion;
 mod ml;
 mod bridge;
 mod search;
