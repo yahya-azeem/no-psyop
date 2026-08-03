@@ -163,6 +163,157 @@ async fn probe_media_via_proxy_headers() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires stored IG credential"]
+async fn probe_search() {
+    let cred = load_stored_credential();
+    let mut ing = InstagramIngester;
+    let posts = ing.search_posts(&cred, "halal food trucks dallas").await;
+    match posts {
+        Ok(posts) => {
+            println!("SEARCH posts: {}", posts.len());
+            for p in posts.iter().take(8) {
+                println!(
+                    "  id={} user={} video={} media=[{}] caption={}",
+                    p.id,
+                    p.author_username,
+                    p.is_video,
+                    p.media_urls.iter().map(|u| summarize_url(u)).collect::<Vec<_>>().join(", "),
+                    p.content.chars().take(50).collect::<String>()
+                );
+            }
+            assert!(!posts.is_empty(), "expected search results");
+        }
+        Err(e) => println!("SEARCH ERROR: {}", e),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires stored IG credential"]
+async fn probe_search_raw_endpoints() {
+    use no_pysop_lib::http::HttpClient;
+
+    let cred = load_stored_credential();
+    let token = crate_ensure_session(&cred.session_token);
+    let client = HttpClient::with_session(&token);
+    let client = client.client().clone();
+
+    let q = "halal%20food%20trucks%20dallas";
+    let url = format!("https://www.instagram.com/web/search/topsearch/?query={}", q);
+    let resp = client
+        .get(&url)
+        .header("X-IG-App-ID", "936619743392459")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", "https://www.instagram.com/explore/search/")
+        .send()
+        .await;
+    match resp {
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let text = r.text().await.unwrap_or_default();
+            println!("TOPSEARCH status={} len={} preview={}", status, text.len(), text.chars().take(300).collect::<String>());
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                let users = v["users"].as_array().map(|a| a.len()).unwrap_or(0);
+                let tags = v["hashtags"].as_array().map(|a| a.len()).unwrap_or(0);
+                let places = v["places"].as_array().map(|a| a.len()).unwrap_or(0);
+                println!("TOPSEARCH users={} hashtags={} places={}", users, tags, places);
+                for t in v["hashtags"].as_array().unwrap_or(&vec![]) {
+                    if let Some(n) = t["hashtag"]["name"].as_str() {
+                        println!("  TAG: #{}", n);
+                    }
+                }
+                for u in v["users"].as_array().unwrap_or(&vec![]) {
+                    if let Some(n) = u["user"]["username"].as_str() {
+                        println!("  USER: @{}", n);
+                    }
+                }
+            }
+        }
+        Err(e) => println!("TOPSEARCH ERROR: {}", e),
+    }
+
+    // Now fetch the first user's media directly
+    if let Ok(r) = client
+        .get("https://www.instagram.com/api/v1/users/66312721094/media/?count=5")
+        .header("X-IG-App-ID", "936619743392459")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", "https://www.instagram.com/bobokamol_/")
+        .send()
+        .await
+    {
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap_or_default();
+        println!("USERMEDIA status={} len={} preview={}", status, text.len(), text.chars().take(300).collect::<String>());
+    } else {
+        println!("USERMEDIA request failed");
+    }
+
+    // GraphQL user timeline
+    let vars = "%7B%22id%22%3A%2266312721094%22%2C%22first%22%3A12%7D";
+    if let Ok(r) = client
+        .get(&format!(
+            "https://www.instagram.com/graphql/query/?query_hash=d04b0a864b4b54837c0d870b0e77f076&variables={}",
+            vars
+        ))
+        .header("X-IG-App-ID", "936619743392459")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", "https://www.instagram.com/bobokamol_/")
+        .send()
+        .await
+    {
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap_or_default();
+        println!("GRAPHQL user timeline status={} len={} preview={}", status, text.len(), text.chars().take(400).collect::<String>());
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let edges = v["data"]["user"]["edge_owner_to_timeline_media"]["edges"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!("GRAPHQL edges: {}", edges);
+        }
+    } else {
+        println!("GRAPHQL user timeline request failed");
+    }
+
+    // hashtag sections
+    if let Ok(r) = client
+        .post("https://www.instagram.com/api/v1/tags/halalfoodtrucks/sections/")
+        .json(&serde_json::json!({"surface":"grid","tab":"recent","page_type":"tags","include_persistent":true}))
+        .header("X-IG-App-ID", "936619743392459")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Content-Type", "application/json")
+        .header("Referer", "https://www.instagram.com/explore/tags/halalfoodtrucks/")
+        .send()
+        .await
+    {
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap_or_default();
+        println!("TAGS sections status={} len={} preview={}", status, text.len(), text.chars().take(400).collect::<String>());
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let secs = v["sections"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!("TAGS sections: {}", secs);
+        }
+    } else {
+        println!("TAGS sections request failed");
+    }
+
+    // alternate user feed endpoints
+    for (name, path) in [
+        ("feed/user", "/api/v1/feed/user/66312721094/?count=5"),
+        ("users/feed", "/api/v1/users/66312721094/feed/?count=5"),
+    ] {
+        if let Ok(r) = client
+            .get(&format!("https://www.instagram.com{}", path))
+            .header("X-IG-App-ID", "936619743392459")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", "https://www.instagram.com/bobokamol_/")
+            .send()
+            .await
+        {
+            let status = r.status().as_u16();
+            let text = r.text().await.unwrap_or_default();
+            println!("{} status={} len={} preview={}", name, status, text.len(), text.chars().take(200).collect::<String>());
+        }
+    }
+}
+
 fn crate_ensure_session(token: &str) -> String {
     if token.trim().starts_with("sessionid=") || token.trim().starts_with("sessionid%3D") {
         token.to_string()
@@ -191,36 +342,41 @@ async fn probe_media_proxy_range_behavior() {
     assert!(store.has_credential(&Platform::Instagram), "no stored cred");
 
     let empty_headers = tauri::http::HeaderMap::new();
-    let no_range = media::proxy(&store, &url, &empty_headers);
-    match &no_range {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let cl = resp.headers().get("content-length").cloned();
-            let ct = resp.headers().get("content-type").cloned();
-            let len = resp.body().len();
-            println!(
-                "PROXY no-range: status={} content_type={:?} content_length={:?} body_bytes={}",
-                status, ct, cl, len
-            );
-        }
-        Err(e) => println!("PROXY no-range ERROR: {}", e),
-    }
-
     let mut range_headers = tauri::http::HeaderMap::new();
     range_headers.insert("range", "bytes=0-".parse().unwrap());
-    let open_range = media::proxy(&store, &url, &range_headers);
-    match &open_range {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let cl = resp.headers().get("content-length").cloned();
-            let cr = resp.headers().get("content-range").cloned();
-            let ct = resp.headers().get("content-type").cloned();
-            let len = resp.body().len();
-            println!(
-                "PROXY range=bytes=0-: status={} content_type={:?} content_range={:?} content_length={:?} body_bytes={}",
-                status, ct, cr, cl, len
-            );
+
+    // proxy uses reqwest::blocking; run it off the tokio runtime
+    let handle = std::thread::spawn(move || {
+        let no_range = media::proxy(&store, &url, &empty_headers);
+        match &no_range {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let cl = resp.headers().get("content-length").cloned();
+                let ct = resp.headers().get("content-type").cloned();
+                let len = resp.body().len();
+                println!(
+                    "PROXY no-range: status={} content_type={:?} content_length={:?} body_bytes={}",
+                    status, ct, cl, len
+                );
+            }
+            Err(e) => println!("PROXY no-range ERROR: {}", e),
         }
-        Err(e) => println!("PROXY range=bytes=0- ERROR: {}", e),
-    }
+
+        let open_range = media::proxy(&store, &url, &range_headers);
+        match &open_range {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let cl = resp.headers().get("content-length").cloned();
+                let cr = resp.headers().get("content-range").cloned();
+                let ct = resp.headers().get("content-type").cloned();
+                let len = resp.body().len();
+                println!(
+                    "PROXY range=bytes=0-: status={} content_type={:?} content_range={:?} content_length={:?} body_bytes={}",
+                    status, ct, cr, cl, len
+                );
+            }
+            Err(e) => println!("PROXY range=bytes=0- ERROR: {}", e),
+        }
+    });
+    handle.join().expect("proxy thread panicked");
 }

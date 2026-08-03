@@ -231,31 +231,65 @@ impl InstagramIngester {
         }
         let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("json: {} (body: {})", e, text.chars().take(200).collect::<String>()))?;
 
-        let mut posts = Vec::new();
-        let mut usernames: Vec<String> = Vec::new();
+        let mut users: Vec<(String, String)> = Vec::new();
+        if let Some(arr) = body["users"].as_array() {
+            for u in arr {
+                let user = &u["user"];
+                let pk = user["pk"].as_str()
+                    .map(String::from)
+                    .or_else(|| user["pk"].as_i64().map(|i| i.to_string()))
+                    .unwrap_or_default();
+                let username = user["username"].as_str().unwrap_or("").to_string();
+                if !pk.is_empty() {
+                    users.push((pk, username));
+                }
+            }
+        }
+
         let mut hashtags: Vec<String> = Vec::new();
-
-        if let Some(users) = body["users"].as_array() {
-            for u in users {
-                if let Some(user) = u["user"].as_object() {
-                    if let Some(pk) = user.get("pk").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) {
-                        usernames.push(pk.to_string());
-                    }
+        if let Some(arr) = body["hashtags"].as_array() {
+            for t in arr {
+                if let Some(name) = t["hashtag"]["name"].as_str() {
+                    hashtags.push(name.to_string());
                 }
             }
         }
 
-        if let Some(tags) = body["hashtags"].as_array() {
-            for t in tags {
-                if let Some(tag) = t["hashtag"].as_object() {
-                    if let Some(name) = tag.get("name").and_then(|v| v.as_str()) {
-                        hashtags.push(name.to_string());
-                    }
-                }
-            }
-        }
-
+        let mut posts = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
+
+        for (pk, username) in users {
+            if posts.len() >= 30 { break; }
+            let media_url = format!("https://www.instagram.com/api/v1/feed/user/{}/?count=12", pk);
+            if let Ok(resp) = client.client()
+                .get(&media_url)
+                .header("X-IG-App-ID", "936619743392459")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Referer", &format!("https://www.instagram.com/{}/", username))
+                .send()
+                .await
+            {
+                if let Ok(t) = resp.text().await {
+                    if let Ok(user_body) = serde_json::from_str::<serde_json::Value>(&t) {
+                        let items = user_body["items"].as_array().or(user_body["feed_items"].as_array());
+                        if let Some(items) = items {
+                            for item in items {
+                                let m = item.get("media_or_ad").unwrap_or(item);
+                                if let Some(mut post) = post_from_media(m) {
+                                    if post.author_id.is_empty() { post.author_id = pk.clone(); }
+                                    if post.author_username.is_empty() { post.author_username = username.clone(); }
+                                    if seen_ids.insert(post.id.clone()) {
+                                        posts.push(post);
+                                    }
+                                }
+                                if posts.len() >= 30 { break; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for tag in &hashtags {
             if posts.len() >= 30 { break; }
             let tag_url = format!("https://www.instagram.com/api/v1/tags/{}/sections/", tag);
@@ -265,6 +299,7 @@ impl InstagramIngester {
                 "page_type": "tags",
                 "include_persistent": true,
             });
+            let csrf = self.extract_csrf(&client).await.unwrap_or_default();
             if let Ok(resp) = client.client()
                 .post(&tag_url)
                 .json(&payload)
@@ -272,6 +307,7 @@ impl InstagramIngester {
                 .header("X-Requested-With", "XMLHttpRequest")
                 .header("Content-Type", "application/json")
                 .header("Referer", "https://www.instagram.com/explore/tags/")
+                .header("X-CSRFToken", &csrf)
                 .send()
                 .await
             {
@@ -280,34 +316,15 @@ impl InstagramIngester {
                         for section in tag_body["sections"].as_array().unwrap_or(&vec![]) {
                             for item in section["layout_content"]["medias"].as_array().unwrap_or(&vec![]) {
                                 if let Some(m) = item.get("media") {
-                                    if let Some(pid) = m["pk"].as_i64().or(m["id"].as_i64()).map(|i| i.to_string()) {
-                                        if !seen_ids.insert(pid.clone()) { continue; }
-                                        let text = m["caption"]["text"].as_str().unwrap_or("").to_string();
-                                        let author_id = m["user"]["pk"].as_i64().map(|i| i.to_string()).unwrap_or_default();
-                                        let author_username = m["user"]["username"].as_str().unwrap_or("").to_string();
-                                        let ts = m["taken_at"].as_i64().unwrap_or(0) as u64;
-                                        let is_video = m["media_type"].as_i64() == Some(3) || m["is_video"].as_bool().unwrap_or(false);
-                                        let mut media_urls = Vec::new();
-                                        if is_video {
-                                            if let Some(src) = m["video_versions"].as_array().and_then(|v| v.first()).and_then(|v| v["url"].as_str()) {
-                                                media_urls.push(src.to_string());
-                                            }
-                                        } else {
-                                            if let Some(src) = m["image_versions2"]["candidates"].as_array().and_then(|c| c.first()).and_then(|c| c["url"].as_str()) {
-                                                media_urls.push(src.to_string());
-                                            }
+                                    if let Some(post) = post_from_media(m) {
+                                        if seen_ids.insert(post.id.clone()) {
+                                            posts.push(post);
                                         }
-                                        posts.push(Post {
-                                            id: pid, platform: Platform::Instagram,
-                                            author_id, author_username, content: text,
-                                            media_urls, poster_url: extract_poster_url(&m), liker_ids: vec![], commenter_ids: vec![],
-                                            timestamp: ts, is_video,
-                                            engagement_score: None, is_synthetic: None, vector_embedding: None,
-                                            author_is_mutual: None, author_is_close_friend: None,
-                                        });
                                     }
+                                    if posts.len() >= 30 { break; }
                                 }
                             }
+                            if posts.len() >= 30 { break; }
                         }
                     }
                 }
@@ -515,6 +532,9 @@ impl PlatformIngester for InstagramIngester {
 
                 let likers: Vec<String> = m["like_count"].as_i64().map(|_| vec![]).unwrap_or_default();
                 let commenters: Vec<String> = m["comment_count"].as_i64().map(|_| vec![]).unwrap_or_default();
+                let likes = m["like_count"].as_i64().unwrap_or(0) as u32;
+                let comments = m["comment_count"].as_i64().unwrap_or(0) as u32;
+                let engagement = if likes + comments > 0 { Some((likes + comments) as f32) } else { None };
 
                 posts.push(Post {
                     id, platform: Platform::Instagram,
@@ -524,7 +544,7 @@ impl PlatformIngester for InstagramIngester {
                     timestamp: ts, is_video,
                     author_is_mutual: mutual,
                     author_is_close_friend: close_friend,
-                    engagement_score: None,
+                    engagement_score: engagement,
                     is_synthetic: None,
                     vector_embedding: None,
                 });
@@ -681,6 +701,50 @@ fn extract_poster_url(item: &serde_json::Value) -> Option<String> {
         .as_array()
         .and_then(|a| a.first())
         .and_then(|c| c["url"].as_str().map(String::from))
+}
+
+fn parse_user_pk(user: &serde_json::Value) -> String {
+    user["pk"]
+        .as_str()
+        .map(String::from)
+        .or_else(|| user["pk"].as_i64().map(|i| i.to_string()))
+        .or_else(|| user["id"].as_i64().map(|i| i.to_string()))
+        .unwrap_or_default()
+}
+
+fn post_from_media(m: &serde_json::Value) -> Option<Post> {
+    let id = m["id"].as_str()
+        .map(String::from)
+        .or_else(|| m["pk"].as_i64().map(|i| i.to_string()))?;
+    let code = m["code"].as_str().unwrap_or(&id);
+    let text = m["caption"]["text"].as_str().unwrap_or("").to_string();
+    let author_id = parse_user_pk(&m["user"]);
+    let author_username = m["user"]["username"].as_str().unwrap_or("").to_string();
+    let ts = m["taken_at"].as_i64().unwrap_or(0) as u64;
+    let (is_video, media_urls) = classify_media(m);
+    let (mutual, close_friend) = friendship_flags(m);
+    let likes = m["like_count"].as_i64().unwrap_or(0) as u32;
+    let comments = m["comment_count"].as_i64().unwrap_or(0) as u32;
+    let engagement = if likes + comments > 0 { Some((likes + comments) as f32) } else { None };
+
+    Some(Post {
+        id: code.to_string(),
+        platform: Platform::Instagram,
+        author_id,
+        author_username,
+        content: text,
+        media_urls,
+        poster_url: extract_poster_url(m),
+        liker_ids: Vec::new(),
+        commenter_ids: Vec::new(),
+        timestamp: ts,
+        is_video,
+        author_is_mutual: mutual,
+        author_is_close_friend: close_friend,
+        engagement_score: engagement,
+        is_synthetic: None,
+        vector_embedding: None,
+    })
 }
 
 const SHORTCODE_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";

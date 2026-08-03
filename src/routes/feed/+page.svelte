@@ -179,7 +179,7 @@
         <p class="feed-empty-hint">Connect your accounts in Settings, then click Sync now.</p>
       </div>
     {:else}
-      <MediaGrid items={items} />
+      <MediaGrid items={items} sectioned />
     {/if}
 
     {#if $isCaughtUp}

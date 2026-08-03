@@ -4,7 +4,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import type { Comment, FeedItem } from '$lib/types';
 
-  let { items } = $props<{ items: FeedItem[] }>();
+  let { items, sectioned = false }: { items: FeedItem[]; sectioned?: boolean } = $props();
   let openIdx = $state(-1);
   let comments = $state<Comment[]>([]);
   let commentsLoading = $state(false);
@@ -12,11 +12,35 @@
   let dismissed = $state(new Set<string>());
 
   let current = $derived(openIdx >= 0 && openIdx < items.length ? items[openIdx] : null);
-  let gridItems = $derived(items.filter((i: FeedItem) => !dismissed.has(i.post.id)));
+  let gridItems: FeedItem[] = $derived(items.filter((i) => !dismissed.has(i.post.id)));
 
-  function isColor(item: FeedItem) {
+  const VIRAL_THRESHOLD = 1000;
+
+  function isFamily(item: FeedItem) {
     return item.post.author_is_mutual === true || item.post.author_is_close_friend === true;
   }
+
+  function isColor(item: FeedItem) {
+    return isFamily(item);
+  }
+
+  type Sec = { gi: number; item: FeedItem };
+  let indexed: Sec[] = $derived(gridItems.map((item, gi) => ({ item, gi })));
+  let famSec = $derived(indexed.filter((s) => isFamily(s.item)));
+  let viralSec = $derived(
+    indexed.filter((s) => !isFamily(s.item) && (s.item.post.engagement_score ?? 0) >= VIRAL_THRESHOLD)
+  );
+  let feedSec = $derived(
+    indexed.filter((s) => !isFamily(s.item) && (s.item.post.engagement_score ?? 0) < VIRAL_THRESHOLD)
+  );
+  let sections = $derived.by(() => {
+    if (!sectioned) return [];
+    return [
+      { title: 'Feed', sub: 'posts from your networks', entries: feedSec },
+      { title: 'Friends & Family', sub: 'mutuals and close friends', entries: famSec },
+      { title: 'Viral for you', sub: 'high engagement', entries: viralSec },
+    ].filter((s) => s.entries.length > 0);
+  });
 
   async function loadComments(postId: string) {
     comments = [];
@@ -106,44 +130,95 @@
 </script>
 
 <div class="media-grid">
-  {#each gridItems as item, i (item.post.id)}
-    <button
-      class="grid-cell"
-      class:is-video={item.post.is_video}
-      class:color={isColor(item)}
-      onclick={() => open(i)}
-      aria-label={item.post.content || `${item.post.author_username} post`}
-    >
-      {#if item.post.media_urls[0]}
-        {#if item.post.is_video}
-          <video
-            src={proxiedMedia(item.post.media_urls[0])}
-            poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
-            muted
-            playsinline
-            preload="metadata"
-            onmouseenter={playHover}
-            onmouseleave={pauseHover}
-            onclick={toggleGridVideo}
-            onerror={onMediaError}
-          ></video>
-          <span class="cell-badge">▶</span>
+  {#if sectioned}
+    {#each sections as sec}
+      <section class="grid-section">
+        <div class="section-head">
+          <h3 class="section-title">{sec.title}</h3>
+          <span class="section-sub">{sec.sub}</span>
+        </div>
+        <div class="grid-row">
+          {#each sec.entries as { gi, item }}
+            <button
+              class="grid-cell"
+              class:is-video={item.post.is_video}
+              class:color={isColor(item)}
+              onclick={() => open(gi)}
+              aria-label={item.post.content || `${item.post.author_username} post`}
+            >
+              {#if item.post.media_urls[0]}
+                {#if item.post.is_video}
+                  <video
+                    src={proxiedMedia(item.post.media_urls[0])}
+                    poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
+                    muted
+                    playsinline
+                    preload="metadata"
+                    onmouseenter={playHover}
+                    onmouseleave={pauseHover}
+                    onclick={toggleGridVideo}
+                    onerror={onMediaError}
+                  ></video>
+                  <span class="cell-badge">▶</span>
+                {:else}
+                  <img
+                    src={proxiedMedia(item.post.media_urls[0])}
+                    alt=""
+                    loading="lazy"
+                    onerror={onMediaError}
+                  />
+                {/if}
+              {:else}
+                <span class="cell-text">{item.post.content}</span>
+              {/if}
+              {#if isColor(item)}
+                <span class="cell-friend">●</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/each}
+  {:else}
+    {#each gridItems as item, i (item.post.id)}
+      <button
+        class="grid-cell"
+        class:is-video={item.post.is_video}
+        class:color={isColor(item)}
+        onclick={() => open(i)}
+        aria-label={item.post.content || `${item.post.author_username} post`}
+      >
+        {#if item.post.media_urls[0]}
+          {#if item.post.is_video}
+            <video
+              src={proxiedMedia(item.post.media_urls[0])}
+              poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
+              muted
+              playsinline
+              preload="metadata"
+              onmouseenter={playHover}
+              onmouseleave={pauseHover}
+              onclick={toggleGridVideo}
+              onerror={onMediaError}
+            ></video>
+            <span class="cell-badge">▶</span>
+          {:else}
+            <img
+              src={proxiedMedia(item.post.media_urls[0])}
+              alt=""
+              loading="lazy"
+              onerror={onMediaError}
+            />
+          {/if}
         {:else}
-          <img
-            src={proxiedMedia(item.post.media_urls[0])}
-            alt=""
-            loading="lazy"
-            onerror={onMediaError}
-          />
+          <span class="cell-text">{item.post.content}</span>
         {/if}
-      {:else}
-        <span class="cell-text">{item.post.content}</span>
-      {/if}
-      {#if isColor(item)}
-        <span class="cell-friend">●</span>
-      {/if}
-    </button>
-  {/each}
+        {#if isColor(item)}
+          <span class="cell-friend">●</span>
+        {/if}
+      </button>
+    {/each}
+  {/if}
 </div>
 
 {#if current}
@@ -238,6 +313,38 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 0.4rem;
+  }
+  .grid-section {
+    grid-column: 1 / -1;
+    display: contents;
+  }
+  .section-head {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    padding: 1.1rem 0 0.4rem 0;
+    border-top: 1px solid var(--border);
+    margin-top: 0.5rem;
+  }
+  .grid-section:first-child .section-head {
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0.2rem;
+  }
+  .section-title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .section-sub {
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+  }
+  .grid-row {
+    grid-column: 1 / -1;
+    display: contents;
   }
   .grid-cell {
     position: relative;

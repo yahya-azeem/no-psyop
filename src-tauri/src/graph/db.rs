@@ -59,6 +59,7 @@ impl SocialGraph {
                 author_is_mutual INTEGER,
                 author_is_close_friend INTEGER,
                 is_synthetic INTEGER,
+                engagement_score REAL,
                 seen INTEGER NOT NULL DEFAULT 0,
                 proximity_score REAL DEFAULT 0.0,
                 PRIMARY KEY (id, platform)
@@ -99,16 +100,17 @@ impl SocialGraph {
             let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
             rows.collect::<Result<Vec<_>>>()?
         };
-        for col in ["author_is_mutual", "author_is_close_friend", "seen", "poster_url"] {
+        for col in ["author_is_mutual", "author_is_close_friend", "seen", "poster_url", "engagement_score"] {
             if !existing.iter().any(|c| c == col) {
-                if col == "poster_url" {
-                    self.conn.execute_batch("ALTER TABLE posts ADD COLUMN poster_url TEXT;")?;
-                } else {
-                    self.conn.execute_batch(&format!(
-                        "ALTER TABLE posts ADD COLUMN {} INTEGER;",
-                        col
-                    ))?;
-                }
+                let ty = match col {
+                    "poster_url" => "TEXT",
+                    "engagement_score" => "REAL",
+                    _ => "INTEGER",
+                };
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE posts ADD COLUMN {} {};",
+                    col, ty
+                ))?;
             }
         }
         Ok(())
@@ -216,15 +218,17 @@ impl SocialGraph {
         self.conn.execute(
             "INSERT OR REPLACE INTO posts (id, platform, author_id, author_username, content,
              media_urls, poster_url, liker_ids, commenter_ids, timestamp, is_video,
-             author_is_mutual, author_is_close_friend, is_synthetic, proximity_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             author_is_mutual, author_is_close_friend, is_synthetic, engagement_score, proximity_score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 post.id, platform_int, post.author_id, post.author_username, post.content,
                 media_json, post.poster_url, liker_json, commenter_json, post.timestamp,
                 post.is_video as i32,
                 post.author_is_mutual.map(|v| v as i32),
                 post.author_is_close_friend.map(|v| v as i32),
-                post.is_synthetic, proximity,
+                post.is_synthetic,
+                post.engagement_score,
+                proximity,
             ],
         )?;
         Ok(())
@@ -276,7 +280,7 @@ impl SocialGraph {
         let mut stmt = self.conn.prepare(
             "SELECT id, platform, author_id, author_username, content,
                     media_urls, poster_url, liker_ids, commenter_ids, timestamp, is_video,
-                    author_is_mutual, author_is_close_friend, is_synthetic
+                    author_is_mutual, author_is_close_friend, is_synthetic, engagement_score
              FROM posts
              WHERE platform = ?1 AND is_synthetic IS NOT 1 AND seen IS NOT 1
              ORDER BY proximity_score DESC, timestamp DESC
@@ -298,6 +302,7 @@ impl SocialGraph {
             let author_is_mutual: Option<i32> = row.get(11)?;
             let author_is_close_friend: Option<i32> = row.get(12)?;
             let is_synthetic: Option<i32> = row.get(13)?;
+            let engagement_score: Option<f32> = row.get(14)?;
 
             Ok(Post {
                 id,
@@ -313,7 +318,7 @@ impl SocialGraph {
                 is_video: is_video != 0,
                 author_is_mutual: author_is_mutual.map(|v| v != 0),
                 author_is_close_friend: author_is_close_friend.map(|v| v != 0),
-                engagement_score: None,
+                engagement_score,
                 is_synthetic: is_synthetic.map(|v| v != 0),
                 vector_embedding: None,
             })

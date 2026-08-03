@@ -129,10 +129,13 @@
       {#if selectedConv}
         <div class="msg-list">
           {#each messages as msg}
-            <div class="msg-bubble">
+            <div
+              class="msg-bubble"
+              class:own={msg.sender_id === 'You' || msg.sender_id === ''}
+            >
               <div class="msg-sender">
                 <span class="platform-badge small" style="color: {platformColor(msg.platform)}">{msg.platform}</span>
-                {msg.sender_id}
+                <span class="msg-sender-name">{msg.sender_id || 'You'}</span>
               </div>
               <div class="msg-content">{msg.content}</div>
               <div class="msg-time">{formatTimestamp(msg.timestamp)}</div>
@@ -174,7 +177,11 @@
   .msg-area { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 1rem; max-height: 500px; overflow-y: auto; }
   .msg-list { display: flex; flex-direction: column; gap: 0.75rem; }
   .msg-bubble { padding: 0.5rem 0.75rem; background: var(--bg); border-radius: var(--radius); }
-  .msg-sender { font-size: 0.8rem; font-weight: 500; margin-bottom: 0.25rem; }
+  .msg-bubble.own { align-self: flex-end; background: var(--accent); color: white; }
+  .msg-bubble.own .msg-sender-name { color: rgba(255, 255, 255, 0.85); }
+  .msg-bubble.own .msg-time { color: rgba(255, 255, 255, 0.7); }
+  .msg-sender { font-size: 0.8rem; font-weight: 500; margin-bottom: 0.25rem; display: flex; align-items: baseline; }
+  .msg-sender-name { font-weight: 700; }
   .msg-content { font-size: 0.9rem; line-height: 1.5; }
   .msg-time { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.25rem; }
   .empty-hint { color: var(--fg-muted); font-size: 0.85rem; text-align: center; padding: 2rem 0; }
