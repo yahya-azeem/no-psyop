@@ -22,10 +22,6 @@ fn load_credential() -> Credential {
         .expect("set TWITTER_COOKIE env var or store a Twitter credential")
 }
 
-fn summarize_url(u: &str) -> String {
-    format!("{}", u.split('/').nth(2).unwrap_or("?")).chars().take(48).collect::<String>()
-}
-
 #[tokio::test]
 #[ignore = "requires TWITTER_COOKIE"]
 async fn probe_twitter_session() {
@@ -57,6 +53,21 @@ async fn probe_twitter_feed() {
             }
         }
         Err(e) => println!("TWITTER FEED ERROR: {}", e),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TWITTER_COOKIE"]
+async fn probe_twitter_profile() {
+    let name = std::env::var("TWITTER_PROFILE").unwrap_or_else(|_| "jack".into());
+    let cred = load_credential();
+    let mut ing = TwitterIngester;
+    match ing.fetch_profile(&cred, &name).await {
+        Ok(u) => println!(
+            "TWITTER PROFILE {}: id={} username={} followers={} following={}",
+            name, u.id, u.username, u.followers.len(), u.follows.len()
+        ),
+        Err(e) => println!("TWITTER PROFILE ERROR: {}", e),
     }
 }
 

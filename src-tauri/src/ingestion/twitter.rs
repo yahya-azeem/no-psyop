@@ -1,40 +1,37 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
-use crate::http::HttpClient;
+use crate::http::xproxy::XProxy;
 use crate::types::{Credential, Message, Platform, Post, SocialUser};
 use super::PlatformIngester;
-
-const API_BASE: &str = "https://api.twitter.com";
-const GTG_BASE: &str = "https://x.com";
 
 pub struct TwitterIngester;
 
 impl TwitterIngester {
-    fn bearer_token(&self) -> &str {
-        "AAAAAAAAAAAAAAAAAAAAAFQODgEAAAAAVHTp76UysRhH10FzPHFSKPvR4wU%3Dk4vetsERHMKFlrsH0SzkvFZHe9rRcf2laWBTKnLEbYpCfLGKcx"
-    }
-
-    fn guest_token(&self) -> &str {
-        "AAAAAAAAAAAAAAAAAAAAAFQODgEAAAAAVHTp76UysRhH10FzPHFSKPvR4wU%3Dk4vetsERHMKFlrsH0SzkvFZHe9rRcf2laWBTKnLEbYpCfLGKcx"
-    }
-
-    async fn get_guest_token(&self, client: &mut HttpClient) -> Result<String, String> {
-        let url = format!("{}/1.1/guest/activate.json", API_BASE);
-        let body = client.post_json(&url, serde_json::json!({}), None).await?;
-        body["guest_token"].as_str()
-            .map(String::from)
-            .ok_or_else(|| "no guest token".into())
-    }
-
     fn extract_tweets(&self, body: &serde_json::Value) -> Vec<Post> {
         let mut posts = Vec::new();
+
+        // Real HomeTimeline shape (captured via Playwright): snake_case with trailing `t`.
+        if let Some(instructions) = body["data"]["home"]["home_timeline_urt"]["instructions"].as_array() {
+            for instruction in instructions {
+                if let Some(entries) = instruction["entries"].as_array() {
+                    for entry in entries {
+                        let result = &entry["content"]["itemContent"]["tweet_results"]["result"];
+                        if !result.is_null() {
+                            if let Some(post) = self.parse_tweet(result) {
+                                posts.push(post);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if let Some(entries) = body["data"]["home"]["home_timeline_ur"]["instructions"].as_array() {
             for instruction in entries {
                 if let Some(entries) = instruction["entries"].as_array() {
                     for entry in entries {
                         let result = &entry["content"]["itemContent"]["tweet_results"]["result"];
-                    if !result.is_null() {
+                        if !result.is_null() {
                             if let Some(post) = self.parse_tweet(result) {
                                 posts.push(post);
                             }
@@ -49,7 +46,7 @@ impl TwitterIngester {
                 if let Some(add_entries) = instr["addEntries"]["entries"].as_array() {
                     for entry in add_entries {
                         let result = &entry["content"]["itemContent"]["tweet_results"]["result"];
-                    if !result.is_null() {
+                        if !result.is_null() {
                             if let Some(post) = self.parse_tweet(result) {
                                 posts.push(post);
                             }
@@ -72,7 +69,59 @@ impl TwitterIngester {
 
     fn parse_tweet(&self, result: &serde_json::Value) -> Option<Post> {
         let legacy = result.get("legacy")?;
-        self.parse_legacy_tweet(legacy)
+        let id = result["rest_id"]
+            .as_str()
+            .or_else(|| legacy["id_str"].as_str())?
+            .to_string();
+        let text = legacy["full_text"]
+            .as_str()
+            .or_else(|| legacy["text"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let user = &result["core"]["user_results"]["result"];
+        let user_id = user["rest_id"]
+            .as_str()
+            .or_else(|| legacy["user_id_str"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let username = user["core"]["screen_name"]
+            .as_str()
+            .or_else(|| legacy["screen_name"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let timestamp = created_at_ts(&result["legacy"]);
+
+        let (media_urls, is_video) = extract_media(legacy);
+
+        let liker_ids: Vec<String> = legacy["favorited_by"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        let commenter_ids: Vec<String> = legacy["reply_count"]
+            .as_i64()
+            .map(|_| Vec::new())
+            .unwrap_or_default();
+
+        Some(Post {
+            id,
+            platform: Platform::Twitter,
+            author_id: user_id,
+            author_username: username,
+            content: text,
+            media_urls,
+            poster_url: None,
+            liker_ids,
+            commenter_ids,
+            timestamp,
+            is_video,
+            author_is_mutual: None,
+            author_is_close_friend: None,
+            engagement_score: None,
+            is_synthetic: None,
+            vector_embedding: None,
+        })
     }
 
     fn parse_legacy_tweet(&self, tweet: &serde_json::Value) -> Option<Post> {
@@ -84,30 +133,8 @@ impl TwitterIngester {
 
         let user_id = tweet["user_id_str"].as_str().unwrap_or("").to_string();
         let username = tweet["screen_name"].as_str().unwrap_or("").to_string();
-        let timestamp = (tweet["timestamp_ms"].as_i64()
-            .or_else(|| tweet["timestamp_ms"].as_str().and_then(|s| s.parse::<i64>().ok()))
-            .unwrap_or(0) / 1000) as u64;
-        let is_video = tweet["extended_entities"]["media"].as_array()
-            .map(|a| a.iter().any(|m| m["type"].as_str() == Some("video")))
-            .unwrap_or(false);
-
-        let mut media_urls = Vec::new();
-        if let Some(media) = tweet["extended_entities"]["media"].as_array() {
-            for m in media {
-                if let Some(url) = m["media_url_https"].as_str().or(m["media_url"].as_str()) {
-                    media_urls.push(url.to_string());
-                }
-            }
-        }
-        if media_urls.is_empty() {
-            if let Some(media) = tweet["entities"]["media"].as_array() {
-                for m in media {
-                    if let Some(url) = m["media_url_https"].as_str().or(m["media_url"].as_str()) {
-                        media_urls.push(url.to_string());
-                    }
-                }
-            }
-        }
+        let timestamp = created_at_ts(tweet);
+        let (media_urls, is_video) = extract_media(tweet);
 
         let liker_ids: Vec<String> = tweet["favorited_by"].as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -138,16 +165,19 @@ impl TwitterIngester {
     }
 
     fn extract_user_id(&self, body: &serde_json::Value) -> String {
-        body["data"]["user"]["rest_id"]
+        body["data"]["user"]["result"]["rest_id"]
             .as_str()
+            .or_else(|| body["data"]["user"]["rest_id"].as_str())
             .or_else(|| body["data"]["user"]["id_str"].as_str())
             .unwrap_or("")
             .to_string()
     }
 
     fn extract_username(&self, body: &serde_json::Value) -> String {
-        body["data"]["user"]["legacy"]["screen_name"]
+        body["data"]["user"]["result"]["core"]["screen_name"]
             .as_str()
+            .or_else(|| body["data"]["user"]["result"]["legacy"]["screen_name"].as_str())
+            .or_else(|| body["data"]["user"]["legacy"]["screen_name"].as_str())
             .or_else(|| body["data"]["user"]["screen_name"].as_str())
             .unwrap_or("")
             .to_string()
@@ -228,66 +258,47 @@ impl TwitterIngester {
 
         msgs
     }
+}
 
-    fn ct0(&self, credential: &Credential) -> String {
-        credential.session_token
-            .split(';')
-            .find(|p| p.trim().starts_with("ct0="))
-            .and_then(|p| p.split('=').nth(1))
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    }
-
-    fn session_gt(&self, credential: &Credential) -> Option<String> {
-        credential.session_token
-            .split(';')
-            .find(|p| p.trim().starts_with("gt="))
-            .and_then(|p| p.split('=').nth(1))
-            .map(|s| s.trim().to_string())
-    }
-
-    async fn guest_token_for(&self, client: &mut HttpClient, credential: &Credential) -> String {
-        if let Some(gt) = self.session_gt(credential) {
-            return gt;
+/// Seconds since epoch. Real GraphQL tweets carry a `created_at` string like
+/// "Sun Aug 02 21:29:26 +0000 2026"; legacy shapes carry `timestamp_ms`.
+fn created_at_ts(tweet: &serde_json::Value) -> u64 {
+    if let Some(s) = tweet["created_at"].as_str() {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(s, "%a %b %d %H:%M:%S %z %Y") {
+            return dt.timestamp() as u64;
         }
-        self.get_guest_token(client).await.unwrap_or_default()
     }
+    (tweet["timestamp_ms"]
+        .as_i64()
+        .or_else(|| tweet["timestamp_ms"].as_str().and_then(|s| s.parse::<i64>().ok()))
+        .unwrap_or(0)
+        / 1000) as u64
+}
 
-    fn gql_headers(&self, guest_token: &str, ct0: &str, authenticated: bool) -> Vec<(&'static str, String)> {
-        let mut headers = vec![
-            ("x-guest-token", guest_token.to_string()),
-            ("x-csrf-token", ct0.to_string()),
-            ("x-twitter-active-user", "yes".to_string()),
-            ("x-twitter-client-language", "en".to_string()),
-        ];
-        // Authenticated sessions authenticate via cookies (auth_token + ct0);
-        // the guest bearer only applies to anonymous requests.
-        if !authenticated {
-            headers.push(("authorization", format!("Bearer {}", self.bearer_token())));
+fn extract_media(tweet: &serde_json::Value) -> (Vec<String>, bool) {
+    let is_video = tweet["extended_entities"]["media"]
+        .as_array()
+        .map(|a| a.iter().any(|m| m["type"].as_str() == Some("video")))
+        .unwrap_or(false);
+
+    let mut media_urls = Vec::new();
+    if let Some(media) = tweet["extended_entities"]["media"].as_array() {
+        for m in media {
+            if let Some(url) = m["media_url_https"].as_str().or(m["media_url"].as_str()) {
+                media_urls.push(url.to_string());
+            }
         }
-        headers
     }
-
-    fn is_authenticated(&self, credential: &Credential) -> bool {
-        credential.session_token
-            .split(';')
-            .any(|p| p.trim().starts_with("auth_token="))
+    if media_urls.is_empty() {
+        if let Some(media) = tweet["entities"]["media"].as_array() {
+            for m in media {
+                if let Some(url) = m["media_url_https"].as_str().or(m["media_url"].as_str()) {
+                    media_urls.push(url.to_string());
+                }
+            }
+        }
     }
-
-    async fn graphql(&self, client: &mut HttpClient, query_id: &str, name: &str, features: &serde_json::Value, variables: &serde_json::Value, guest_token: &str, ct0: &str, authenticated: bool) -> Result<serde_json::Value, String> {
-        let url = format!(
-            "{}/i/api/graphql/{}/{}",
-            GTG_BASE, query_id, name
-        );
-        let extra = self.gql_headers(guest_token, ct0, authenticated);
-        let body = serde_json::json!({
-            "variables": variables,
-            "queryId": query_id,
-            "features": features,
-        });
-        client.post_json_headers(&url, body, Some("https://x.com/home"), &extra).await
-    }
+    (media_urls, is_video)
 }
 
 #[async_trait]
@@ -297,104 +308,12 @@ impl PlatformIngester for TwitterIngester {
     }
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
-        let mut client = HttpClient::with_session(&credential.session_token);
-        let guest_token = self.guest_token_for(&mut client, credential).await;
-        let ct0 = self.ct0(credential);
-
-        let features = serde_json::json!({
-            "rweb_video_screen_enabled": false,
-            "rweb_cashtags_enabled": true,
-            "profile_label_improvements_pcf_label_in_post_enabled": true,
-            "responsive_web_profile_redirect_enabled": false,
-            "rweb_tipjar_consumption_enabled": false,
-            "verified_phone_label_enabled": false,
-            "creator_subscriptions_tweet_preview_api_enabled": true,
-            "responsive_web_graphql_timeline_navigation_enabled": true,
-            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
-            "premium_content_api_read_enabled": false,
-            "communities_web_enable_tweet_community_results_fetch": true,
-            "c9s_tweet_anatomy_moderator_badge_enabled": true,
-            "responsive_web_grok_analyze_button_fetch_trends_enabled": false,
-            "responsive_web_grok_analyze_post_followups_enabled": true,
-            "rweb_cashtags_composer_attachment_enabled": true,
-            "responsive_web_jetfuel_frame": true,
-            "responsive_web_grok_share_attachment_enabled": true,
-            "responsive_web_grok_annotations_enabled": true,
-            "articles_preview_enabled": true,
-            "responsive_web_edit_tweet_api_enabled": true,
-            "rweb_conversational_replies_downvote_enabled": false,
-            "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
-            "view_counts_everywhere_api_enabled": true,
-            "longform_notetweets_consumption_enabled": true,
-            "responsive_web_twitter_article_tweet_consumption_enabled": true,
-            "content_disclosure_indicator_enabled": true,
-            "content_disclosure_ai_generated_indicator_enabled": true,
-            "responsive_web_grok_show_grok_translated_post": true,
-            "responsive_web_grok_analysis_button_from_backend": true,
-            "post_ctas_fetch_enabled": true,
-            "freedom_of_speech_not_reach_fetch_enabled": true,
-            "standardized_nudges_misinfo": true,
-            "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
-            "longform_notetweets_rich_text_read_enabled": true,
-            "longform_notetweets_inline_media_enabled": false,
-            "responsive_web_grok_image_annotation_enabled": true,
-            "responsive_web_grok_imagine_annotation_enabled": true,
-            "responsive_web_grok_community_note_auto_translation_is_enabled": true,
-            "responsive_web_enhance_cards_enabled": false
-        });
-
-        let variables = serde_json::json!({
-            "count": 20,
-            "includePromotedContent": false,
-            "latestControlAvailable": true,
-            "requestContext": "launch",
-            "seenTweetIds": [],
-            "withCommunity": true,
-        });
-
-        let query_id = "7zlnp2TxC044W4C1ZUJMHw";
-        let body = self.graphql(&mut client, query_id, "HomeTimeline", &features, &variables, &guest_token, &ct0, self.is_authenticated(credential)).await?;
-        let posts = self.extract_tweets(&body);
-
-        Ok(posts)
+        let body = XProxy::feed(&credential.session_token).await?;
+        Ok(self.extract_tweets(&body))
     }
 
     async fn fetch_profile(&mut self, credential: &Credential, username: &str) -> Result<SocialUser, String> {
-        let mut client = HttpClient::with_session(&credential.session_token);
-        let guest_token = self.guest_token_for(&mut client, credential).await;
-        let ct0 = self.ct0(credential);
-
-        let variables = serde_json::json!({
-            "screen_name": username,
-            "withSafetyModeUserFields": true,
-            "withSuperFollowsUserFields": true,
-        });
-
-        let features = serde_json::json!({
-            "hidden_profile_subscriptions_enabled": true,
-            "profile_label_improvements_pcf_label_in_post_enabled": true,
-            "responsive_web_profile_redirect_enabled": false,
-            "rweb_tipjar_consumption_enabled": false,
-            "verified_phone_label_enabled": false,
-            "subscriptions_verification_info_is_identity_verified_enabled": true,
-            "subscriptions_verification_info_verified_since_enabled": true,
-            "highlights_tweets_tab_ui_enabled": true,
-            "responsive_web_twitter_article_notes_tab_enabled": true,
-            "subscriptions_feature_can_gift_premium": true,
-            "creator_subscriptions_tweet_preview_api_enabled": true,
-            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
-            "responsive_web_graphql_timeline_navigation_enabled": true,
-        });
-
-        let vars_b64 = base64_url(&variables);
-        let feats_b64 = base64_url(&features);
-        let url = format!(
-            "{}/i/api/graphql/IGgvgiOx4QZndDHuD3x9TQ/UserByScreenName?variables={}&features={}",
-            GTG_BASE, vars_b64, feats_b64
-        );
-
-        let extra = self.gql_headers(&guest_token, &ct0, self.is_authenticated(credential));
-        let body = client.get_json_headers(&url, Some("https://x.com/"), &extra).await?;
+        let body = XProxy::profile(&credential.session_token, username).await?;
 
         let id = self.extract_user_id(&body);
         let name = self.extract_username(&body);
@@ -412,35 +331,13 @@ impl PlatformIngester for TwitterIngester {
     }
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
-        let mut client = HttpClient::with_session(&credential.session_token);
-        let guest_token = self.guest_token_for(&mut client, credential).await;
-        let ct0 = self.ct0(credential);
-
-        let variables = serde_json::json!({});
-        let features = serde_json::json!({});
-
-        let vars_b64 = base64_url(&variables);
-        let feats_b64 = base64_url(&features);
-        let url = format!(
-            "{}/i/api/graphql/sIC-NZ_cqXLO_WH4jDWFQA/DMPinnedInboxQuery?variables={}&features={}",
-            GTG_BASE, vars_b64, feats_b64
-        );
-
-        let extra = self.gql_headers(&guest_token, &ct0, self.is_authenticated(credential));
-        let body = client.get_json_headers(&url, Some("https://x.com/messages"), &extra).await?;
-
+        let body = XProxy::inbox(&credential.session_token).await?;
         Ok(self.extract_messages(&body))
     }
 
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
         Ok(credential.clone())
     }
-}
-
-fn base64_url(v: &serde_json::Value) -> String {
-    let json = serde_json::to_string(v).unwrap_or_default();
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
 #[cfg(test)]
@@ -507,9 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_tweets_home_timeline_ur() {
+    fn test_extract_tweets_home_timeline_urt_snake() {
         let body = serde_json::json!({
-            "data": { "home": { "home_timeline_ur": { "instructions": [
+            "data": { "home": { "home_timeline_urt": { "instructions": [
                 { "type": "TimelineAddEntries", "entries": [
                     { "content": { "itemContent": { "tweet_results": { "result": {
                         "legacy": legacy_tweet("10", "first", "1", "u1", 1_000_000)
@@ -527,7 +424,23 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_tweets_home_timeline_urt() {
+    fn test_extract_tweets_home_timeline_ur() {
+        let body = serde_json::json!({
+            "data": { "home": { "home_timeline_ur": { "instructions": [
+                { "type": "TimelineAddEntries", "entries": [
+                    { "content": { "itemContent": { "tweet_results": { "result": {
+                        "legacy": legacy_tweet("10", "first", "1", "u1", 1_000_000)
+                    } } } } }
+                ] }
+            ] } } }
+        });
+        let posts = ing().extract_tweets(&body);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, "10");
+    }
+
+    #[test]
+    fn test_extract_tweets_home_timeline_urt_camel() {
         let body = serde_json::json!({
             "data": { "home": { "homeTimelineUrt": { "instructions": [
                 { "addEntries": { "entries": [
@@ -558,6 +471,36 @@ mod tests {
     #[test]
     fn test_extract_tweets_empty() {
         assert!(ing().extract_tweets(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn test_extract_user_from_result_shape() {
+        let body = serde_json::json!({
+            "data": { "user": { "result": {
+                "rest_id": "1678652827302862848",
+                "core": { "screen_name": "realname" },
+                "legacy": { "screen_name": "legacyname" }
+            } } }
+        });
+        assert_eq!(ing().extract_user_id(&body), "1678652827302862848");
+        assert_eq!(ing().extract_username(&body), "realname");
+    }
+
+    #[test]
+    fn test_extract_user_result_legacy_fallback() {
+        let body = serde_json::json!({
+            "data": { "user": { "result": {
+                "rest_id": "42",
+                "legacy": { "screen_name": "oldname" }
+            } } }
+        });
+        assert_eq!(ing().extract_username(&body), "oldname");
+    }
+
+    #[test]
+    fn test_extract_user_empty() {
+        assert!(ing().extract_user_id(&serde_json::json!({})).is_empty());
+        assert!(ing().extract_username(&serde_json::json!({})).is_empty());
     }
 
     fn dm_entry(conv: &str, msg_id: &str, text: &str, sender: &str, participants: serde_json::Value) -> serde_json::Value {
@@ -617,15 +560,5 @@ mod tests {
     #[test]
     fn test_extract_messages_empty() {
         assert!(ing().extract_messages(&serde_json::json!({})).is_empty());
-    }
-
-    #[test]
-    fn test_base64_url() {
-        let encoded = base64_url(&serde_json::json!({ "count": 20 }));
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .expect("valid base64");
-        assert_eq!(decoded, br#"{"count":20}"#);
     }
 }
