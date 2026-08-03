@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::HashMap;
 use crate::http::HttpClient;
 use crate::types::{Credential, Message, Platform, Post, SocialUser};
 use super::PlatformIngester;
@@ -83,7 +84,9 @@ impl TwitterIngester {
 
         let user_id = tweet["user_id_str"].as_str().unwrap_or("").to_string();
         let username = tweet["screen_name"].as_str().unwrap_or("").to_string();
-        let timestamp = (tweet["timestamp_ms"].as_i64().unwrap_or(0) / 1000) as u64;
+        let timestamp = (tweet["timestamp_ms"].as_i64()
+            .or_else(|| tweet["timestamp_ms"].as_str().and_then(|s| s.parse::<i64>().ok()))
+            .unwrap_or(0) / 1000) as u64;
         let is_video = tweet["extended_entities"]["media"].as_array()
             .map(|a| a.iter().any(|m| m["type"].as_str() == Some("video")))
             .unwrap_or(false);
@@ -178,6 +181,52 @@ impl TwitterIngester {
             }
         }
         ids
+    }
+
+    fn extract_messages(&self, body: &serde_json::Value) -> Vec<Message> {
+        let mut users: HashMap<String, String> = HashMap::new();
+        let mut msgs: Vec<Message> = Vec::new();
+
+        if let Some(entries) = body["data"]["dm_inbox_timeline"]["timeline"]["instructions"]
+            .as_array().and_then(|i| i.first())
+            .and_then(|i| i["addEntries"]["entries"].as_array())
+        {
+            for entry in entries {
+                if let Some(participants) = entry["content"]["itemContent"]["participants"].as_array() {
+                    for p in participants {
+                        let res = &p["user_results"]["result"];
+                        if let (Some(id), Some(name)) = (
+                            res["rest_id"].as_str(),
+                            res["legacy"]["screen_name"].as_str(),
+                        ) {
+                            users.insert(id.to_string(), name.to_string());
+                        }
+                    }
+                }
+                if let Some(msg) = entry["content"]["itemContent"]["message"].as_object() {
+                    let id = msg["id"].as_str().unwrap_or("").to_string();
+                    let text = msg["text"].as_str().unwrap_or("").to_string();
+                    let sender_raw = msg["sender_id"].as_str().unwrap_or("").to_string();
+                    let sender = users
+                        .get(&sender_raw)
+                        .cloned()
+                        .unwrap_or_else(|| sender_raw.clone());
+                    let conv = msg["conversation_id"].as_str().unwrap_or("").to_string();
+                    let ts = msg["time"].as_i64().unwrap_or(0) as u64;
+
+                    msgs.push(Message {
+                        id,
+                        platform: Platform::Twitter,
+                        conversation_id: conv,
+                        sender_id: sender,
+                        content: text,
+                        timestamp: ts,
+                    });
+                }
+            }
+        }
+
+        msgs
     }
 
     async fn graphql(&self, client: &mut HttpClient, query_id: &str, features: &serde_json::Value, variables: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -319,32 +368,7 @@ impl PlatformIngester for TwitterIngester {
 
         let body = client.get_json(&url, Some("https://x.com/messages")).await?;
 
-        let mut msgs = Vec::new();
-        if let Some(entries) = body["data"]["dm_inbox_timeline"]["timeline"]["instructions"]
-            .as_array().and_then(|i| i.first())
-            .and_then(|i| i["addEntries"]["entries"].as_array())
-        {
-            for entry in entries {
-                if let Some(msg) = entry["content"]["itemContent"]["message"].as_object() {
-                    let id = msg["id"].as_str().unwrap_or("").to_string();
-                    let text = msg["text"].as_str().unwrap_or("").to_string();
-                    let sender = msg["sender_id"].as_str().unwrap_or("").to_string();
-                    let conv = msg["conversation_id"].as_str().unwrap_or("").to_string();
-                    let ts = msg["time"].as_i64().unwrap_or(0) as u64;
-
-                    msgs.push(Message {
-                        id,
-                        platform: Platform::Twitter,
-                        conversation_id: conv,
-                        sender_id: sender,
-                        content: text,
-                        timestamp: ts,
-                    });
-                }
-            }
-        }
-
-        Ok(msgs)
+        Ok(self.extract_messages(&body))
     }
 
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
@@ -356,4 +380,191 @@ fn base64_url(v: &serde_json::Value) -> String {
     let json = serde_json::to_string(v).unwrap_or_default();
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ing() -> TwitterIngester {
+        TwitterIngester
+    }
+
+    fn legacy_tweet(id: &str, text: &str, user_id: &str, screen_name: &str, ts_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id_str": id,
+            "full_text": text,
+            "user_id_str": user_id,
+            "screen_name": screen_name,
+            "timestamp_ms": ts_ms.to_string(),
+            "entities": { "media": [] },
+            "extended_entities": { "media": [] },
+        })
+    }
+
+    #[test]
+    fn test_parse_legacy_tweet_text() {
+        let tweet = legacy_tweet("1", "hello world", "500", "alice", 1_700_000_000_000);
+        let post = ing().parse_legacy_tweet(&tweet).expect("parsed");
+        assert_eq!(post.id, "1");
+        assert_eq!(post.platform, Platform::Twitter);
+        assert_eq!(post.author_id, "500");
+        assert_eq!(post.author_username, "alice");
+        assert_eq!(post.timestamp, 1_700_000_000u64);
+        assert!(!post.is_video);
+        assert!(post.media_urls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_legacy_tweet_media_video() {
+        let tweet = serde_json::json!({
+            "id_str": "2",
+            "full_text": "clip",
+            "user_id_str": "77",
+            "screen_name": "bob",
+            "timestamp_ms": 1000,
+            "extended_entities": {
+                "media": [
+                    { "type": "video", "media_url_https": "https://pbs.twimg.com/v.mp4" },
+                    { "type": "photo", "media_url_https": "https://pbs.twimg.com/p.jpg" }
+                ]
+            },
+            "favorited_by": ["100", "101"]
+        });
+        let post = ing().parse_legacy_tweet(&tweet).expect("parsed");
+        assert!(post.is_video);
+        assert_eq!(post.media_urls, vec![
+            "https://pbs.twimg.com/v.mp4",
+            "https://pbs.twimg.com/p.jpg"
+        ]);
+        assert_eq!(post.liker_ids, vec!["100", "101"]);
+    }
+
+    #[test]
+    fn test_parse_legacy_tweet_missing_id() {
+        assert!(ing().parse_legacy_tweet(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn test_extract_tweets_home_timeline_ur() {
+        let body = serde_json::json!({
+            "data": { "home": { "home_timeline_ur": { "instructions": [
+                { "type": "TimelineAddEntries", "entries": [
+                    { "content": { "itemContent": { "tweet_results": { "result": {
+                        "legacy": legacy_tweet("10", "first", "1", "u1", 1_000_000)
+                    } } } } },
+                    { "content": { "itemContent": { "tweet_results": { "result": {
+                        "legacy": legacy_tweet("11", "second", "2", "u2", 2_000_000)
+                    } } } } }
+                ] }
+            ] } } }
+        });
+        let posts = ing().extract_tweets(&body);
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].id, "10");
+        assert_eq!(posts[1].content, "second");
+    }
+
+    #[test]
+    fn test_extract_tweets_home_timeline_urt() {
+        let body = serde_json::json!({
+            "data": { "home": { "homeTimelineUrt": { "instructions": [
+                { "addEntries": { "entries": [
+                    { "content": { "itemContent": { "tweet_results": { "result": {
+                        "legacy": legacy_tweet("20", "urt post", "3", "u3", 3_000_000)
+                    } } } } }
+                ] } }
+            ] } } }
+        });
+        let posts = ing().extract_tweets(&body);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, "20");
+        assert_eq!(posts[0].author_username, "u3");
+    }
+
+    #[test]
+    fn test_extract_tweets_global_objects() {
+        let body = serde_json::json!({
+            "globalObjects": { "tweets": {
+                "30": legacy_tweet("30", "legacy objects", "4", "u4", 4_000_000)
+            } }
+        });
+        let posts = ing().extract_tweets(&body);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].content, "legacy objects");
+    }
+
+    #[test]
+    fn test_extract_tweets_empty() {
+        assert!(ing().extract_tweets(&serde_json::json!({})).is_empty());
+    }
+
+    fn dm_entry(conv: &str, msg_id: &str, text: &str, sender: &str, participants: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "entryId": format!("dm-conversation-{}", conv),
+            "content": { "itemContent": {
+                "conversationId": conv,
+                "message": {
+                    "id": msg_id,
+                    "text": text,
+                    "sender_id": sender,
+                    "conversation_id": conv,
+                    "time": 5_000_000i64
+                },
+                "participants": participants
+            } }
+        })
+    }
+
+    #[test]
+    fn test_extract_messages_resolves_usernames() {
+        let participants = serde_json::json!([
+            { "user_results": { "result": { "rest_id": "500", "legacy": { "screen_name": "alice" } } } },
+            { "user_results": { "result": { "rest_id": "77", "legacy": { "screen_name": "bob" } } } }
+        ]);
+        let body = serde_json::json!({
+            "data": { "dm_inbox_timeline": { "timeline": { "instructions": [
+                { "addEntries": { "entries": [
+                    dm_entry("c1", "m1", "hey", "500", participants)
+                ] } }
+            ] } } }
+        });
+
+        let msgs = ing().extract_messages(&body);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].platform, Platform::Twitter);
+        assert_eq!(msgs[0].conversation_id, "c1");
+        assert_eq!(msgs[0].sender_id, "alice");
+        assert_eq!(msgs[0].content, "hey");
+        assert_eq!(msgs[0].timestamp, 5_000_000u64);
+    }
+
+    #[test]
+    fn test_extract_messages_falls_back_to_raw_id() {
+        let body = serde_json::json!({
+            "data": { "dm_inbox_timeline": { "timeline": { "instructions": [
+                { "addEntries": { "entries": [
+                    dm_entry("c2", "m2", "hi", "999", serde_json::json!([]))
+                ] } }
+            ] } } }
+        });
+        let msgs = ing().extract_messages(&body);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].sender_id, "999");
+    }
+
+    #[test]
+    fn test_extract_messages_empty() {
+        assert!(ing().extract_messages(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn test_base64_url() {
+        let encoded = base64_url(&serde_json::json!({ "count": 20 }));
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("valid base64");
+        assert_eq!(decoded, br#"{"count":20}"#);
+    }
 }
