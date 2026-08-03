@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import MediaGrid from '$lib/components/MediaGrid.svelte';
+  import NewsRow from '$lib/components/NewsRow.svelte';
   import StoriesTray from '$lib/components/StoriesTray.svelte';
   import { feed, isFetching, isCaughtUp, visiblePosts, addPosts, clearFeed } from '$lib/stores/feed';
   import { startupSync } from '$lib/autosync';
@@ -173,6 +174,7 @@
   </details>
 
   <div class="feed-grid">
+    <NewsRow items={items} />
     {#if items.length === 0 && !$isFetching}
       <div class="feed-empty">
         <p>No posts yet.</p>
