@@ -125,6 +125,15 @@ impl HttpClient {
     }
 
     pub async fn get_json(&self, url: &str, referer: Option<&str>) -> Result<serde_json::Value, String> {
+        self.get_json_headers(url, referer, &[]).await
+    }
+
+    pub async fn get_json_headers(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        extra: &[(&'static str, String)],
+    ) -> Result<serde_json::Value, String> {
         {
             let mut limiter = self.rate_limiter.lock().map_err(|e| e.to_string())?;
             limiter.check()?;
@@ -133,6 +142,9 @@ impl HttpClient {
         let mut req = self.client.get(url);
         if let Some(ref_) = referer {
             req = req.header("Referer", ref_);
+        }
+        for (k, v) in extra {
+            req = req.header(*k, v);
         }
 
         let resp = req.send().await.map_err(|e| format!("http: {}", e))?;

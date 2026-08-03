@@ -36,10 +36,8 @@ impl LinkedInIngester {
     }
 
     fn build_client(&self, credential: &Credential) -> HttpClient {
-        let mut client = HttpClient::with_session(&credential.session_token);
-        let csrf = self.csrf_token(credential);
-        client.set_cookies(&format!("JSESSIONID=\"{}\"", csrf));
-        client
+        // session_token already carries li_at + JSESSIONID; with_session seeds them all.
+        HttpClient::with_session(&credential.session_token)
     }
 
     fn parse_feed_items(&self, body: &serde_json::Value) -> Vec<Post> {
@@ -242,12 +240,12 @@ impl PlatformIngester for LinkedInIngester {
         let csrf = self.csrf_token(credential);
 
         let url = format!(
-            "{}/feedDash/homeUpdates?moduleKey=feed&start=0&count=10&csrfToken={}",
+            "{}/feed/dashUpdates?start=0&count=10&feedType=ALL&feedModuleType=HYPE_FEED&csrfToken={}",
             API_BASE,
             urlencoding::encode(&csrf)
         );
 
-        let body = client.get_json(&url, Some("https://www.linkedin.com/feed/")).await?;
+        let body = self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/feed/").await?;
         let posts = self.parse_feed_items(&body);
 
         Ok(posts)
@@ -267,10 +265,10 @@ impl PlatformIngester for LinkedInIngester {
             API_BASE, _username, urlencoding::encode(&csrf)
         );
 
-        let body = client.get_json(&url, Some("https://www.linkedin.com/in/")).await?;
+        let body = self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/in/").await?;
         let mut profile = self.extract_profile(&body);
 
-        if let Ok(followers_body) = client.get_json(&followers_url, Some("https://www.linkedin.com/in/")).await {
+        if let Ok(followers_body) = self.get_voyager(&client, &followers_url, &csrf, "https://www.linkedin.com/in/").await {
             if let Some(elements) = followers_body["data"]["connections"]["elements"].as_array() {
                 for element in elements {
                     if let Some(urn) = element["$urn"].as_str().or(element["urn"].as_str()) {
@@ -295,7 +293,7 @@ impl PlatformIngester for LinkedInIngester {
             urlencoding::encode(&csrf)
         );
 
-        let body = client.get_json(&url, Some("https://www.linkedin.com/messaging/")).await?;
+        let body = self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/messaging/").await?;
         let msgs = self.extract_messages(&body);
 
         Ok(msgs)
@@ -307,10 +305,26 @@ impl PlatformIngester for LinkedInIngester {
 
         let url = format!("{}/me?csrfToken={}", API_BASE, urlencoding::encode(&csrf));
 
-        match client.get_json(&url, Some("https://www.linkedin.com/")).await {
+        match self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/").await {
             Ok(_) => Ok(credential.clone()),
             Err(e) => Err(format!("linkedin session expired: {}", e)),
         }
+    }
+}
+
+impl LinkedInIngester {
+    fn voyager_headers(&self, csrf: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("Accept", "application/vnd.linkedin.normalized+json+2.1".to_string()),
+            ("Csrf-Token", csrf.to_string()),
+            ("X-RestLi-Protocol-Version", "2.0.0".to_string()),
+            ("X-Requested-With", "XMLHttpRequest".to_string()),
+        ]
+    }
+
+    async fn get_voyager(&self, client: &HttpClient, url: &str, csrf: &str, referer: &str) -> Result<serde_json::Value, String> {
+        let extra = self.voyager_headers(csrf);
+        client.get_json_headers(url, Some(referer), &extra).await
     }
 }
 
