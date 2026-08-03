@@ -332,6 +332,9 @@ impl PlatformIngester for TwitterIngester {
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
         let body = XProxy::inbox(&credential.session_token).await?;
+        if body["empty_inbox"].as_bool().unwrap_or(false) {
+            return Ok(Vec::new());
+        }
         Ok(self.extract_messages(&body))
     }
 

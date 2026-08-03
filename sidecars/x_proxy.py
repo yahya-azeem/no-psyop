@@ -8,6 +8,10 @@ Plain HTTP/TLS clients (reqwest, curl) get 403 from x.com's bot protection, so
 we let an actual browser runtime make the authenticated calls and capture the
 API responses.
 
+A persistent browser profile (per device, in the app data dir) stores the
+X Chat passcode enrollment so the encrypted-DM inbox loads without the
+Create-Passcode onboarding wall.
+
 Endpoints (HTTP on 127.0.0.1:XPROXY_PORT or 8192):
   GET  /health            -> {"status":"ok"}
   POST /op                -> body: {"op":"feed"|"profile"|"inbox","username":"...","cookies":"auth_token=A; ct0=B; ..."}
@@ -27,6 +31,20 @@ from playwright.sync_api import sync_playwright
 
 PORT = int(os.environ.get("XPROXY_PORT", "8192"))
 HOME = "https://x.com/home"
+
+DM_LIST_OPS = [
+    "DMPinnedInboxQuery",
+    "DmInboxTimeline",
+    "DmAllSearchSlice",
+    "ConversationTimeline",
+    "InboxConversation",
+]
+DM_ANY_OPS = ["Dm", "Chat", "Conversation", "Inbox", "Message"]
+
+
+def profile_dir():
+    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(data, "no_pysop", "xchat_profile")
 
 
 def _cookie_list(cookie_str):
@@ -49,27 +67,26 @@ class BrowserWorker(threading.Thread):
         super().__init__(daemon=True)
         self.jobs = jobs
         self.ready = threading.Event()
-        self.pw = None
-        self.browser = None
         self.ctx = None
         self.page = None
-        self._captured = {}
 
     def run(self):
         try:
-            self.pw = sync_playwright().start()
-            self.browser = self.pw.chromium.launch(
+            pw = sync_playwright().start()
+            self.ctx = pw.chromium.launch_persistent_context(
+                profile_dir(),
                 headless=True,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                 ],
+                locale="en-US",
+                timezone_id="UTC",
             )
-            self.ctx = self.browser.new_context(locale="en-US", timezone_id="UTC")
             self.page = self.ctx.new_page()
             self.ready.set()
-            print("[x_proxy] browser ready", flush=True)
+            print(f"[x_proxy] browser ready (profile {profile_dir()})", flush=True)
         except Exception as e:
             print(f"[x_proxy] browser init failed: {e}", flush=True)
             self.ready.set()
@@ -87,23 +104,19 @@ class BrowserWorker(threading.Thread):
 
     def _dispatch(self, op, payload):
         cookie_str = payload.get("cookies", "")
+        if cookie_str:
+            self.ctx.add_cookies(_cookie_list(cookie_str))
         if op == "feed":
-            return self._capture("https://x.com/home", ["HomeTimeline"], 15, cookie_str)
+            return self._capture("https://x.com/home", ["HomeTimeline"], 15)
         if op == "profile":
             return self._capture(
-                f"https://x.com/{payload.get('username', '')}", ["UserByScreenName"], 15, cookie_str
+                f"https://x.com/{payload.get('username', '')}", ["UserByScreenName"], 15
             )
         if op == "inbox":
-            return self._capture(
-                "https://x.com/messages", ["DMPinnedInboxQuery", "DmInboxTimeline"], 12, cookie_str
-            )
+            return self._inbox()
         raise ValueError(f"unknown op {op}")
 
-    def _capture(self, url, names, wait, cookie_str):
-        if cookie_str:
-            self.ctx.clear_cookies()
-            self.ctx.add_cookies(_cookie_list(cookie_str))
-
+    def _capture(self, url, names, wait):
         captured = {}
         pref = "/i/api/graphql/"
 
@@ -132,6 +145,44 @@ class BrowserWorker(threading.Thread):
             return {"error": f"no response captured for {names} at {url}"}
         name, body = next(iter(captured.items()))
         return {"op": name, "body": body}
+
+    def _inbox(self):
+        captured = {}
+        pref = "/i/api/graphql/"
+
+        def on_response(resp):
+            u = resp.url
+            if pref not in u:
+                return
+            tail = u.split(pref)[-1]
+            name = tail.split("/")[1].split("?")[0] if "/" in tail else tail.split("?")[0]
+            if name in captured:
+                return
+            if (any(n in name for n in DM_LIST_OPS) or any(n in name for n in DM_ANY_OPS)) and resp.ok:
+                try:
+                    captured[name] = resp.json()
+                except Exception:
+                    pass
+
+        self.page.on("response", on_response)
+        self.page.goto("https://x.com/messages", wait_until="domcontentloaded", timeout=60000)
+        deadline = time.time() + 15
+        while time.time() < deadline and not captured:
+            self.page.mouse.wheel(0, 2000)
+            self.page.wait_for_timeout(700)
+        self.page.remove_listener("response", on_response)
+        if captured:
+            name, body = next(iter(captured.items()))
+            return {"op": name, "body": body}
+
+        body_text = ""
+        try:
+            body_text = self.page.inner_text("body")
+        except Exception:
+            pass
+        if "Empty inbox" in body_text or "Start Conversation" in body_text:
+            return {"op": "empty_inbox", "body": {"empty_inbox": True}}
+        return {"error": "no DM response captured and inbox not detected"}
 
 
 class Handler(BaseHTTPRequestHandler):
