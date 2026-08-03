@@ -6,6 +6,14 @@ use super::PlatformIngester;
 
 const API_BASE: &str = "https://www.linkedin.com/voyager/api";
 
+fn normalize_ts(raw: u64) -> u64 {
+    if raw > 1_000_000_000_000 {
+        raw / 1_000
+    } else {
+        raw
+    }
+}
+
 pub struct LinkedInIngester;
 
 impl LinkedInIngester {
@@ -84,7 +92,7 @@ impl LinkedInIngester {
             .unwrap_or(&author_id)
             .to_string();
 
-        let timestamp = (activity["temporal"]["time"].as_i64().unwrap_or(0)) as u64;
+        let timestamp = normalize_ts(activity["temporal"]["time"].as_i64().unwrap_or(0) as u64);
 
         let mut media_urls = Vec::new();
         if let Some(images) = activity["images"].as_array() {
@@ -204,7 +212,7 @@ impl LinkedInIngester {
                             .and_then(|u| u.rsplit(':').next())
                             .unwrap_or("")
                             .to_string();
-                        let ts = (event["createdAt"].as_i64().unwrap_or(0)) as u64;
+                        let ts = normalize_ts((event["createdAt"].as_i64().unwrap_or(0)) as u64);
 
                         msgs.push(Message {
                             id: msg_id,
@@ -303,5 +311,244 @@ impl PlatformIngester for LinkedInIngester {
             Ok(_) => Ok(credential.clone()),
             Err(e) => Err(format!("linkedin session expired: {}", e)),
         }
+    }
+}
+
+fn cred(session: &str) -> Credential {
+    Credential {
+        platform: Platform::LinkedIn,
+        session_token: session.to_string(),
+        user_id: "123".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ing() -> LinkedInIngester {
+        LinkedInIngester
+    }
+
+    #[test]
+    fn test_csrf_token_from_jsessionid() {
+        let c = cred("li_at=abc123; JSESSIONID=\"ajax:987654\"; lang=en");
+        assert_eq!(ing().csrf_token(&c), "ajax:987654");
+    }
+
+    #[test]
+    fn test_csrf_token_missing() {
+        let c = cred("li_at=abc123; some=x");
+        assert_eq!(ing().csrf_token(&c), "");
+    }
+
+    #[test]
+    fn test_auth_header_bearer() {
+        let c = cred("li_at=abc123; JSESSIONID=x; lang=en");
+        assert_eq!(ing().auth_header(&c), "Bearer abc123");
+    }
+
+    #[test]
+    fn test_auth_header_empty() {
+        let c = cred("JSESSIONID=x; lang=en");
+        assert_eq!(ing().auth_header(&c), "Bearer ");
+    }
+
+    #[test]
+    fn test_normalize_ts_seconds_passthrough() {
+        assert_eq!(normalize_ts(1_700_000_000u64), 1_700_000_000u64);
+    }
+
+    #[test]
+    fn test_normalize_ts_millis_to_seconds() {
+        assert_eq!(normalize_ts(1_700_000_000_000u64), 1_700_000_000u64);
+    }
+
+    #[test]
+    fn test_parse_text_activity() {
+        let activity = serde_json::json!({
+            "$urn": "urn:li:activity:7123456789012345678",
+            "summary": { "text": "Just shipped the new dashboard board." },
+            "actor": {
+                "$urn": "urn:li:person:901",
+                "name": "Jane Doe",
+                "miniProfile": { "publicIdentifier": "janedoe" }
+            },
+            "temporal": { "time": 1_700_000_000_000i64 }
+        });
+
+        let post = ing().parse_activity(&activity).expect("should parse");
+        assert_eq!(post.platform, Platform::LinkedIn);
+        assert_eq!(post.id, "7123456789012345678");
+        assert_eq!(post.author_id, "901");
+        assert_eq!(post.author_username, "Jane Doe");
+        assert_eq!(post.content, "Just shipped the new dashboard board.");
+        assert_eq!(post.timestamp, 1_700_000_000u64);
+        assert!(!post.is_video);
+        assert!(post.media_urls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_activity_commentary_fallback() {
+        let activity = serde_json::json!({
+            "urn": "urn:li:activity:123",
+            "commentary": { "text": "Morning thoughts" },
+            "actor": { "urn": "urn:li:person:4", "name": "Bob" },
+            "temporal": { "time": 1_700_000_000_000i64 }
+        });
+        let post = ing().parse_activity(&activity).expect("should parse");
+        assert_eq!(post.content, "Morning thoughts");
+        assert_eq!(post.timestamp, 1_700_000_000u64);
+    }
+
+    #[test]
+    fn test_parse_image_activity_media_and_likers() {
+        let activity = serde_json::json!({
+            "$urn": "urn:li:activity:456",
+            "headline": { "text": "Some image" },
+            "actor": {
+                "$urn": "urn:li:person:100",
+                "miniProfile": { "publicIdentifier": "alice" }
+            },
+            "temporal": { "time": 1_700_000_000_000i64 },
+            "images": [
+                { "url": "https://cdn.example.com/a.jpg" },
+                { "attributes": [ { "detailData": { "url": "https://cdn.example.com/b.jpg" } } ] }
+            ],
+            "likes": {
+                "elements": [
+                    { "actor": { "$urn": "urn:li:person:201" } },
+                    { "actor": { "$urn": "urn:li:person:202" } }
+                ]
+            }
+        });
+
+        let post = ing().parse_activity(&activity).unwrap();
+        assert_eq!(post.media_urls, vec![
+            "https://cdn.example.com/a.jpg",
+            "https://cdn.example.com/b.jpg"
+        ]);
+        assert_eq!(post.liker_ids, vec!["201", "202"]);
+        assert_eq!(post.author_username, "alice");
+        assert!(!post.is_video);
+    }
+
+    #[test]
+    fn test_parse_video_activity() {
+        let activity = serde_json::json!({
+            "$urn": "urn:li:activity:789",
+            "commentary": { "text": "reel time" },
+            "actor": { "$urn": "urn:li:person:300", "name": "Carol" },
+            "temporal": { "time": 1_700_000_000_000i64 },
+            "content": {
+                "type": "video",
+                "playlists": [ { "url": "https://cdn.example.com/video.mp4" } ]
+            }
+        });
+
+        let post = ing().parse_activity(&activity).expect("should parse");
+        assert!(post.is_video);
+        assert_eq!(post.media_urls, vec!["https://cdn.example.com/video.mp4"]);
+    }
+
+    #[test]
+    fn test_parse_activity_missing_urn() {
+        assert!(ing().parse_activity(&serde_json::json!({ "summary": { "text": "x" } })).is_none());
+    }
+
+    #[test]
+    fn test_parse_feed_items_dedupes_across_sections() {
+        let body = serde_json::json!({
+            "data": {
+                "feedDashUrs": {
+                    "elements": [
+                        { "activity": { "$urn": "urn:li:activity:1", "summary": { "text": "one" }, "actor": { "$urn": "urn:li:person:1", "name": "a" }, "temporal": { "time": 1 } } },
+                        { "activity": { "$urn": "urn:li:activity:2", "summary": { "text": "two" }, "actor": { "$urn": "urn:li:person:1", "name": "a" }, "temporal": { "time": 1 } } }
+                    ]
+                }
+            },
+            "included": [
+                { "activity": { "$urn": "urn:li:activity:1", "summary": { "text": "dup" }, "actor": { "$urn": "urn:li:person:1", "name": "a" }, "temporal": { "time": 1 } } },
+                { "activity": { "$urn": "urn:li:activity:3", "summary": { "text": "three" }, "actor": { "$urn": "urn:li:person:1", "name": "a" }, "temporal": { "time": 1 } } }
+            ]
+        });
+
+        let posts = ing().parse_feed_items(&body);
+        let ids: Vec<String> = posts.iter().map(|p| p.id.clone()).collect();
+        assert_eq!(ids, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_parse_feed_items_empty() {
+        assert!(ing().parse_feed_items(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn test_extract_profile() {
+        let body = serde_json::json!({
+            "data": {
+                "user": {
+                    "urn": "urn:li:person:77",
+                    "publicIdentifier": "janedoe",
+                    "followers": { "elements": [ { "urn": "urn:li:person:100" } ] },
+                    "following": { "elements": [ { "urn": "urn:li:person:200" }, { "urn": "urn:li:person:201" } ] }
+                }
+            }
+        });
+        let user = ing().extract_profile(&body);
+        assert_eq!(user.id, "77");
+        assert_eq!(user.platform, Platform::LinkedIn);
+        assert_eq!(user.username, "janedoe");
+        assert_eq!(user.followers, vec!["100"]);
+        assert_eq!(user.follows, vec!["200", "201"]);
+    }
+
+    #[test]
+    fn test_extract_messages_parses_events() {
+        let body = serde_json::json!({
+            "data": {
+                "conversations": {
+                    "elements": [
+                        {
+                            "$urn": "urn:li:messageThread:abc",
+                            "events": [
+                                { "$id": "ev1", "content": { "text": "hey" }, "from": { "urn": "urn:li:person:500" }, "createdAt": 1_700_000_000_000i64 },
+                                { "$id": "ev2", "body": "whats up", "from": { "urn": "urn:li:person:77" }, "createdAt": 1_700_000_100_000i64 }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let msgs = ing().extract_messages(&body);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].platform, Platform::LinkedIn);
+        assert_eq!(msgs[0].conversation_id, "urn:li:messageThread:abc");
+        assert_eq!(msgs[0].sender_id, "500");
+        assert_eq!(msgs[0].content, "hey");
+        assert_eq!(msgs[0].timestamp, 1_700_000_000u64);
+        assert_eq!(msgs[1].content, "whats up");
+        assert_eq!(msgs[1].sender_id, "77");
+    }
+
+    #[test]
+    fn test_extract_messages_body_fallback() {
+        let body = serde_json::json!({
+            "data": { "conversations": { "elements": [
+                { "entityUrn": "urn:li:messageThread:x", "events": [
+                    { "$id": "e1", "body": "msg body only", "from": { "urn": "urn:li:person:1" }, "createdAt": 1000 }
+                ] }
+            ] } }
+        });
+        let msgs = ing().extract_messages(&body);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "msg body only");
+        assert_eq!(msgs[0].conversation_id, "urn:li:messageThread:x");
+    }
+
+    #[test]
+    fn test_extract_messages_empty() {
+        assert!(ing().extract_messages(&serde_json::json!({})).is_empty());
     }
 }

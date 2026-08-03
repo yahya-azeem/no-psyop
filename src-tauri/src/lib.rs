@@ -186,13 +186,35 @@ async fn get_comments(state: State<'_, AppState>, media_id: String) -> Result<Ve
 
 #[tauri::command]
 async fn sync_messages(state: State<'_, AppState>, platform: String) -> Result<usize, String> {
-    if platform != "Instagram" {
-        return Err("message sync is only supported for Instagram".into());
-    }
-    let cred = state.store.get_credential(&types::Platform::Instagram)?
-        .ok_or_else(|| "Instagram not connected".to_string())?;
+    let p = match platform.as_str() {
+        "Instagram" => types::Platform::Instagram,
+        "Twitter" => types::Platform::Twitter,
+        "LinkedIn" => types::Platform::LinkedIn,
+        "All" => {
+            let mut total = 0usize;
+            for pp in &[types::Platform::Instagram, types::Platform::Twitter, types::Platform::LinkedIn] {
+                if let Ok(Some(_)) = state.store.get_credential(pp) {
+                    total += sync_platform_inbox(&state, pp).await?;
+                }
+            }
+            return Ok(total);
+        }
+        _ => return Err("unknown platform".into()),
+    };
+    sync_platform_inbox(&state, &p).await
+}
 
-    let mut ing = ingestion::instagram::InstagramIngester;
+async fn sync_platform_inbox(state: &State<'_, AppState>, platform: &types::Platform) -> Result<usize, String> {
+    let cred = state.store.get_credential(platform)?
+        .ok_or_else(|| format!("{:?} not connected", platform))?;
+
+    let ing: Box<dyn ingestion::PlatformIngester + Send + Sync> = match platform {
+        types::Platform::Instagram => Box::new(ingestion::instagram::InstagramIngester),
+        types::Platform::Twitter => Box::new(ingestion::twitter::TwitterIngester),
+        types::Platform::LinkedIn => Box::new(ingestion::linkedin::LinkedInIngester),
+    };
+
+    let mut ing = ing;
     let threads = ing.fetch_inbox(&cred).await?;
 
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
@@ -297,9 +319,35 @@ async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, Strin
         }
     }
 
+    let inbox_results = engine.fetch_all_inboxes(&creds).await;
+    let mut messages_added = 0usize;
+    for (platform, result) in &inbox_results {
+        match result {
+            Ok(threads) => {
+                if let Ok(graph) = state.graph.lock() {
+                    for (conv, msgs) in threads {
+                        if let Err(e) = graph.save_conversation(conv) {
+                            errors.push(format!("{:?}: save conversation {}: {}", platform, conv.id, e));
+                        }
+                        for m in msgs {
+                            if let Err(e) = graph.save_message(m) {
+                                errors.push(format!("{:?}: save message {}: {}", platform, m.id, e));
+                            } else {
+                                messages_added += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                errors.push(format!("{:?} inbox: {}", platform, e));
+            }
+        }
+    }
+
     Ok(types::SyncResult {
         posts_added,
-        messages_added: 0,
+        messages_added,
         errors,
     })
 }

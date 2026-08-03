@@ -30,7 +30,7 @@ async function syncCycle(): Promise<void> {
     errors.push(String(e));
   }
   try {
-    await invoke<number>('sync_messages', { platform: 'Instagram' });
+    await invoke<number>('sync_messages', { platform: 'All' });
   } catch {
     // message sync is non-fatal
   }

@@ -605,6 +605,10 @@ impl PlatformIngester for InstagramIngester {
         Ok(parse_direct_body(&body))
     }
 
+    async fn fetch_inbox(&mut self, credential: &Credential) -> Result<Vec<(crate::types::Conversation, Vec<Message>)>, String> {
+        self.fetch_inbox(credential).await
+    }
+
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
         let mut client = HttpClient::with_session(&credential.session_token);
         let _csrf = self.extract_csrf(&mut client).await?;

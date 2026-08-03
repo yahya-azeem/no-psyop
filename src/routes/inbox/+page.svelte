@@ -28,7 +28,7 @@
     syncingMsgs = true;
     syncMsg = '';
     try {
-      const saved = await invoke<number>('sync_messages', { platform: 'Instagram' });
+      const saved = await invoke<number>('sync_messages', { platform: 'All' });
       syncMsg = `Synced ${saved} new messages.`;
     } catch (e) {
       syncMsg = `Sync failed: ${e}`;
