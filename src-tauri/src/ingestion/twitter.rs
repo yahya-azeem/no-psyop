@@ -229,13 +229,64 @@ impl TwitterIngester {
         msgs
     }
 
-    async fn graphql(&self, client: &mut HttpClient, query_id: &str, features: &serde_json::Value, variables: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let vars_b64 = base64_url(variables);
+    fn ct0(&self, credential: &Credential) -> String {
+        credential.session_token
+            .split(';')
+            .find(|p| p.trim().starts_with("ct0="))
+            .and_then(|p| p.split('=').nth(1))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+
+    fn session_gt(&self, credential: &Credential) -> Option<String> {
+        credential.session_token
+            .split(';')
+            .find(|p| p.trim().starts_with("gt="))
+            .and_then(|p| p.split('=').nth(1))
+            .map(|s| s.trim().to_string())
+    }
+
+    async fn guest_token_for(&self, client: &mut HttpClient, credential: &Credential) -> String {
+        if let Some(gt) = self.session_gt(credential) {
+            return gt;
+        }
+        self.get_guest_token(client).await.unwrap_or_default()
+    }
+
+    fn gql_headers(&self, guest_token: &str, ct0: &str, authenticated: bool) -> Vec<(&'static str, String)> {
+        let mut headers = vec![
+            ("x-guest-token", guest_token.to_string()),
+            ("x-csrf-token", ct0.to_string()),
+            ("x-twitter-active-user", "yes".to_string()),
+            ("x-twitter-client-language", "en".to_string()),
+        ];
+        // Authenticated sessions authenticate via cookies (auth_token + ct0);
+        // the guest bearer only applies to anonymous requests.
+        if !authenticated {
+            headers.push(("authorization", format!("Bearer {}", self.bearer_token())));
+        }
+        headers
+    }
+
+    fn is_authenticated(&self, credential: &Credential) -> bool {
+        credential.session_token
+            .split(';')
+            .any(|p| p.trim().starts_with("auth_token="))
+    }
+
+    async fn graphql(&self, client: &mut HttpClient, query_id: &str, name: &str, features: &serde_json::Value, variables: &serde_json::Value, guest_token: &str, ct0: &str, authenticated: bool) -> Result<serde_json::Value, String> {
         let url = format!(
-            "{}/i/api/graphql/{}/HomeTimeline?variables={}&features={}",
-            API_BASE, query_id, vars_b64, base64_url(features)
+            "{}/i/api/graphql/{}/{}",
+            GTG_BASE, query_id, name
         );
-        client.get_json(&url, Some("https://x.com/home")).await
+        let extra = self.gql_headers(guest_token, ct0, authenticated);
+        let body = serde_json::json!({
+            "variables": variables,
+            "queryId": query_id,
+            "features": features,
+        });
+        client.post_json_headers(&url, body, Some("https://x.com/home"), &extra).await
     }
 }
 
@@ -247,31 +298,48 @@ impl PlatformIngester for TwitterIngester {
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
         let mut client = HttpClient::with_session(&credential.session_token);
-        let _guest_token = self.get_guest_token(&mut client).await.unwrap_or_default();
+        let guest_token = self.guest_token_for(&mut client, credential).await;
+        let ct0 = self.ct0(credential);
 
         let features = serde_json::json!({
-            "rweb_tipjar_consumption_enabled": true,
-            "responsive_web_graphql_exclude_directive_when_untrue": false,
+            "rweb_video_screen_enabled": false,
+            "rweb_cashtags_enabled": true,
+            "profile_label_improvements_pcf_label_in_post_enabled": true,
+            "responsive_web_profile_redirect_enabled": false,
+            "rweb_tipjar_consumption_enabled": false,
             "verified_phone_label_enabled": false,
             "creator_subscriptions_tweet_preview_api_enabled": true,
             "responsive_web_graphql_timeline_navigation_enabled": true,
             "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+            "premium_content_api_read_enabled": false,
             "communities_web_enable_tweet_community_results_fetch": true,
             "c9s_tweet_anatomy_moderator_badge_enabled": true,
+            "responsive_web_grok_analyze_button_fetch_trends_enabled": false,
+            "responsive_web_grok_analyze_post_followups_enabled": true,
+            "rweb_cashtags_composer_attachment_enabled": true,
+            "responsive_web_jetfuel_frame": true,
+            "responsive_web_grok_share_attachment_enabled": true,
+            "responsive_web_grok_annotations_enabled": true,
             "articles_preview_enabled": true,
-            "tweetypie_unmention_optimization_enabled": true,
             "responsive_web_edit_tweet_api_enabled": true,
+            "rweb_conversational_replies_downvote_enabled": false,
             "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
             "view_counts_everywhere_api_enabled": true,
             "longform_notetweets_consumption_enabled": true,
             "responsive_web_twitter_article_tweet_consumption_enabled": true,
-            "tweet_awards_web_enabled": false,
+            "content_disclosure_indicator_enabled": true,
+            "content_disclosure_ai_generated_indicator_enabled": true,
+            "responsive_web_grok_show_grok_translated_post": true,
+            "responsive_web_grok_analysis_button_from_backend": true,
+            "post_ctas_fetch_enabled": true,
             "freedom_of_speech_not_reach_fetch_enabled": true,
             "standardized_nudges_misinfo": true,
             "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
             "longform_notetweets_rich_text_read_enabled": true,
-            "longform_notetweets_inline_media_enabled": true,
-            "responsive_web_media_download_video_enabled": false,
+            "longform_notetweets_inline_media_enabled": false,
+            "responsive_web_grok_image_annotation_enabled": true,
+            "responsive_web_grok_imagine_annotation_enabled": true,
+            "responsive_web_grok_community_note_auto_translation_is_enabled": true,
             "responsive_web_enhance_cards_enabled": false
         });
 
@@ -280,12 +348,12 @@ impl PlatformIngester for TwitterIngester {
             "includePromotedContent": false,
             "latestControlAvailable": true,
             "requestContext": "launch",
-            "withCommunity": false,
             "seenTweetIds": [],
+            "withCommunity": true,
         });
 
-        let query_id = "fV2JLJF7HTp4PRFGMEBs2Q";
-        let body = self.graphql(&mut client, query_id, &features, &variables).await?;
+        let query_id = "7zlnp2TxC044W4C1ZUJMHw";
+        let body = self.graphql(&mut client, query_id, "HomeTimeline", &features, &variables, &guest_token, &ct0, self.is_authenticated(credential)).await?;
         let posts = self.extract_tweets(&body);
 
         Ok(posts)
@@ -293,13 +361,8 @@ impl PlatformIngester for TwitterIngester {
 
     async fn fetch_profile(&mut self, credential: &Credential, username: &str) -> Result<SocialUser, String> {
         let mut client = HttpClient::with_session(&credential.session_token);
-        let _guest_token = self.get_guest_token(&mut client).await.unwrap_or_default();
-        let _csrf_token = credential.session_token
-            .split(';')
-            .find(|p| p.trim().starts_with("ct0="))
-            .and_then(|p| p.split('=').nth(1))
-            .unwrap_or("")
-            .to_string();
+        let guest_token = self.guest_token_for(&mut client, credential).await;
+        let ct0 = self.ct0(credential);
 
         let variables = serde_json::json!({
             "screen_name": username,
@@ -309,28 +372,29 @@ impl PlatformIngester for TwitterIngester {
 
         let features = serde_json::json!({
             "hidden_profile_subscriptions_enabled": true,
-            "rweb_tipjar_consumption_enabled": true,
-            "responsive_web_graphql_exclude_directive_when_untrue": false,
+            "profile_label_improvements_pcf_label_in_post_enabled": true,
+            "responsive_web_profile_redirect_enabled": false,
+            "rweb_tipjar_consumption_enabled": false,
             "verified_phone_label_enabled": false,
             "subscriptions_verification_info_is_identity_verified_enabled": true,
             "subscriptions_verification_info_verified_since_enabled": true,
             "highlights_tweets_tab_ui_enabled": true,
             "responsive_web_twitter_article_notes_tab_enabled": true,
             "subscriptions_feature_can_gift_premium": true,
+            "creator_subscriptions_tweet_preview_api_enabled": true,
             "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
             "responsive_web_graphql_timeline_navigation_enabled": true,
-            "creator_subscriptions_tweet_preview_api_enabled": true,
-            "responsive_web_enhance_cards_enabled": false,
         });
 
         let vars_b64 = base64_url(&variables);
         let feats_b64 = base64_url(&features);
         let url = format!(
-            "{}/i/api/graphql/uUO_pgTztoVpuiZ8n5wYAw/UserByScreenName?variables={}&features={}",
-            API_BASE, vars_b64, feats_b64
+            "{}/i/api/graphql/IGgvgiOx4QZndDHuD3x9TQ/UserByScreenName?variables={}&features={}",
+            GTG_BASE, vars_b64, feats_b64
         );
 
-        let body = client.get_json(&url, Some("https://x.com/")).await?;
+        let extra = self.gql_headers(&guest_token, &ct0, self.is_authenticated(credential));
+        let body = client.get_json_headers(&url, Some("https://x.com/"), &extra).await?;
 
         let id = self.extract_user_id(&body);
         let name = self.extract_username(&body);
@@ -348,25 +412,22 @@ impl PlatformIngester for TwitterIngester {
     }
 
     async fn fetch_messages(&mut self, credential: &Credential) -> Result<Vec<Message>, String> {
-        let client = HttpClient::with_session(&credential.session_token);
+        let mut client = HttpClient::with_session(&credential.session_token);
+        let guest_token = self.guest_token_for(&mut client, credential).await;
+        let ct0 = self.ct0(credential);
 
-        let variables = serde_json::json!({
-            "count": 20,
-            "includePromotedContent": false,
-            "requestContext": "launch",
-            "withCommunity": false,
-        });
-
+        let variables = serde_json::json!({});
         let features = serde_json::json!({});
 
         let vars_b64 = base64_url(&variables);
         let feats_b64 = base64_url(&features);
         let url = format!(
-            "{}/i/api/graphql/8E8DqWmuxzHIMfFJ4qxaCQ/DmInboxTimeline?variables={}&features={}",
-            API_BASE, vars_b64, feats_b64
+            "{}/i/api/graphql/sIC-NZ_cqXLO_WH4jDWFQA/DMPinnedInboxQuery?variables={}&features={}",
+            GTG_BASE, vars_b64, feats_b64
         );
 
-        let body = client.get_json(&url, Some("https://x.com/messages")).await?;
+        let extra = self.gql_headers(&guest_token, &ct0, self.is_authenticated(credential));
+        let body = client.get_json_headers(&url, Some("https://x.com/messages"), &extra).await?;
 
         Ok(self.extract_messages(&body))
     }
