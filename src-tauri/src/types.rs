@@ -29,6 +29,28 @@ pub struct SocialUser {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryItem {
+    pub id: String,
+    pub media_type: u8,
+    pub media_url: String,
+    pub poster_url: Option<String>,
+    pub is_video: bool,
+    pub timestamp: u64,
+    pub expiring_at: u64,
+    pub caption: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryUser {
+    pub id: UserId,
+    pub username: String,
+    pub profile_pic_url: String,
+    pub is_mutual: bool,
+    pub is_close_friend: bool,
+    pub items: Vec<StoryItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Post {
     pub id: PostId,
     pub platform: Platform,
@@ -36,10 +58,13 @@ pub struct Post {
     pub author_username: String,
     pub content: String,
     pub media_urls: Vec<String>,
+    pub poster_url: Option<String>,
     pub liker_ids: Vec<UserId>,
     pub commenter_ids: Vec<UserId>,
     pub timestamp: u64,
     pub is_video: bool,
+    pub author_is_mutual: Option<bool>,
+    pub author_is_close_friend: Option<bool>,
     pub engagement_score: Option<f32>,
     pub is_synthetic: Option<bool>,
     pub vector_embedding: Option<Vec<f32>>,
@@ -53,6 +78,18 @@ pub struct Message {
     pub sender_id: UserId,
     pub content: String,
     pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: String,
+    pub post_id: PostId,
+    pub platform: Platform,
+    pub author_id: UserId,
+    pub author_username: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub likes: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

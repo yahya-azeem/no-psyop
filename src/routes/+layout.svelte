@@ -1,8 +1,19 @@
 <script lang="ts">
   import '../app.css';
+  import { onMount, onDestroy } from 'svelte';
+  import { runStartupSync, startPeriodicSync, stopPeriodicSync, startupSync } from '$lib/autosync';
 
   let { children } = $props();
   let active = $state('feed');
+
+  onMount(() => {
+    runStartupSync();
+    startPeriodicSync();
+  });
+
+  onDestroy(() => {
+    stopPeriodicSync();
+  });
 </script>
 
 <div class="app-shell">
@@ -39,6 +50,15 @@
     </nav>
 
     <div class="sidebar-footer">
+      {#if $startupSync.status !== 'idle'}
+        <span class="sync-pill" class:done={$startupSync.status === 'done'}
+              class:error={$startupSync.status === 'error'}>
+          {#if $startupSync.status === 'syncing'}
+            <span class="sync-spinner"></span>
+          {/if}
+          {$startupSync.message}
+        </span>
+      {/if}
       <span class="version">v0.1.0</span>
     </div>
   </aside>
@@ -124,6 +144,40 @@
   .sidebar-footer {
     padding-top: 1rem;
     border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .sync-pill {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .sync-pill.done {
+    color: var(--accent);
+  }
+
+  .sync-pill.error {
+    color: #e5484d;
+  }
+
+  .sync-spinner {
+    width: 0.7rem;
+    height: 0.7rem;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .version {

@@ -79,7 +79,7 @@
     </div>
 
     {#if analysis}
-      <div class="analysis-result" style="border-left-color: {analysisColor()}">
+      <div class="analysis-result">
         <div class="analysis-badge" style="background: {analysisColor()}">
           {analysisLabel()}
         </div>
@@ -147,7 +147,7 @@
   .btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
   .btn-primary:hover { background: var(--accent-hover); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .analysis-result { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid var(--border); border-left: 4px solid; border-radius: var(--radius); background: var(--bg-card); }
+  .analysis-result { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
   .analysis-badge { display: inline-block; color: white; font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 100px; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
   .analysis-stats { display: flex; flex-wrap: wrap; gap: 1rem; font-size: 0.85rem; }
   .stat { color: var(--fg-muted); }

@@ -8,9 +8,10 @@ pub mod ingestion;
 mod ml;
 mod bridge;
 mod search;
+mod media;
 
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 use ingestion::PlatformIngester;
 
 struct AppState {
@@ -116,10 +117,13 @@ fn analyze_post(state: State<AppState>, content: String) -> Result<ml::PostFilte
         author_username: "".into(),
         content,
         media_urls: vec![],
+        poster_url: None,
         liker_ids: vec![],
         commenter_ids: vec![],
         timestamp: 0,
         is_video: false,
+        author_is_mutual: None,
+        author_is_close_friend: None,
         engagement_score: None,
         is_synthetic: None,
         vector_embedding: None,
@@ -162,6 +166,57 @@ async fn search_instagram(state: State<'_, AppState>, query: String) -> Result<V
         .ok_or_else(|| "Instagram not connected".to_string())?;
     let mut ing = ingestion::instagram::InstagramIngester;
     ing.search_posts(&cred, &query).await
+}
+
+#[tauri::command]
+async fn get_stories(state: State<'_, AppState>) -> Result<Vec<types::StoryUser>, String> {
+    let cred = state.store.get_credential(&types::Platform::Instagram)?
+        .ok_or_else(|| "Instagram not connected".to_string())?;
+    let mut ing = ingestion::instagram::InstagramIngester;
+    ing.fetch_stories(&cred).await
+}
+
+#[tauri::command]
+async fn get_comments(state: State<'_, AppState>, media_id: String) -> Result<Vec<types::Comment>, String> {
+    let cred = state.store.get_credential(&types::Platform::Instagram)?
+        .ok_or_else(|| "Instagram not connected".to_string())?;
+    let mut ing = ingestion::instagram::InstagramIngester;
+    ing.fetch_comments(&cred, &media_id).await
+}
+
+#[tauri::command]
+async fn sync_messages(state: State<'_, AppState>, platform: String) -> Result<usize, String> {
+    if platform != "Instagram" {
+        return Err("message sync is only supported for Instagram".into());
+    }
+    let cred = state.store.get_credential(&types::Platform::Instagram)?
+        .ok_or_else(|| "Instagram not connected".to_string())?;
+
+    let mut ing = ingestion::instagram::InstagramIngester;
+    let threads = ing.fetch_inbox(&cred).await?;
+
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let mut saved = 0usize;
+    for (conv, msgs) in threads {
+        graph.save_conversation(&conv)?;
+        for m in msgs {
+            graph.save_message(&m)?;
+            saved += 1;
+        }
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+fn mark_post_seen(state: State<AppState>, platform: String, post_id: String) -> Result<(), String> {
+    let p = match platform.as_str() {
+        "Instagram" => types::Platform::Instagram,
+        "Twitter" => types::Platform::Twitter,
+        "LinkedIn" => types::Platform::LinkedIn,
+        _ => return Err("unknown platform".into()),
+    };
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.mark_post_seen(&p, &post_id)
 }
 
 #[tauri::command]
@@ -262,6 +317,26 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .register_uri_scheme_protocol("media", |ctx, request: tauri::http::Request<Vec<u8>>| {
+            let state = ctx.app_handle().state::<AppState>();
+            let path = request.uri().path().trim_start_matches('/').to_string();
+            let remote = media::decode_url(&path);
+
+            let result = match remote {
+                Some(url) => media::proxy(&state.store, &url, request.headers()),
+                None => Err("invalid media url".into()),
+            };
+
+            match result {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let mut resp = tauri::http::Response::builder().status(404);
+                    resp = resp.header("Content-Type", "text/plain");
+                    resp.body(e.into_bytes())
+                        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+                }
+            }
+        })
         .manage(AppState {
             graph: Mutex::new(graph),
             ml: ml::MLPipeline::new(),
@@ -281,6 +356,10 @@ pub fn run() {
             monitor_profile,
             sync_all,
             search_instagram,
+            get_stories,
+            get_comments,
+            sync_messages,
+            mark_post_seen,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

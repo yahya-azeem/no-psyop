@@ -59,6 +59,11 @@ impl GraphEngine {
         db.save_message(msg).map_err(|e| e.to_string())
     }
 
+    pub fn save_conversation(&self, conv: &Conversation) -> Result<(), String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        db.save_conversation(conv).map_err(|e| e.to_string())
+    }
+
     pub fn get_feed(&self, platform: &Platform, limit: usize) -> Result<Vec<Post>, String> {
         let db = self.db.lock().map_err(|e| e.to_string())?;
         db.get_posts_by_proximity(platform, limit).map_err(|e| e.to_string())
@@ -77,5 +82,10 @@ impl GraphEngine {
     pub fn get_messages(&self, conversation_id: &str, platform: &Platform) -> Result<Vec<Message>, String> {
         let db = self.db.lock().map_err(|e| e.to_string())?;
         db.get_messages(conversation_id, platform).map_err(|e| e.to_string())
+    }
+
+    pub fn mark_post_seen(&self, platform: &Platform, post_id: &str) -> Result<(), String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        db.mark_post_seen(platform, post_id).map_err(|e| e.to_string())
     }
 }

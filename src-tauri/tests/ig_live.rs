@@ -63,3 +63,19 @@ async fn test_search_instagram_live() {
         assert!(!p.id.is_empty(), "id empty");
     }
 }
+
+#[tokio::test]
+#[ignore = "requires IG_SESSION_TOKEN env var and live Instagram API"]
+async fn test_fetch_stories_live() {
+    let raw = std::env::var("IG_SESSION_TOKEN").expect("set IG_SESSION_TOKEN env var");
+    let cred = make_cred(&raw);
+    let mut ing = ingestion::instagram::InstagramIngester;
+    let stories = ing.fetch_stories(&cred).await.expect("fetch_stories failed");
+    // Stories tray may be empty if no followed accounts posted recently — check shape only
+    for s in &stories {
+        assert!(!s.username.is_empty(), "story username empty");
+        for item in &s.items {
+            assert!(!item.media_url.is_empty(), "story media url empty");
+        }
+    }
+}

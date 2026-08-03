@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import { startupSync } from '$lib/autosync';
   import type { Conversation, Message } from '$lib/types';
 
   let conversations = $state<Conversation[]>([]);
@@ -8,6 +9,9 @@
   let selectedPlatform = $state<string>('');
   let messages = $state<Message[]>([]);
   let loading = $state(false);
+  let syncingMsgs = $state(false);
+  let syncMsg = $state('');
+  let prevVersion = $state($startupSync.version);
 
   async function loadConversations() {
     loading = true;
@@ -19,6 +23,28 @@
       loading = false;
     }
   }
+
+  async function syncMessages() {
+    syncingMsgs = true;
+    syncMsg = '';
+    try {
+      const saved = await invoke<number>('sync_messages', { platform: 'Instagram' });
+      syncMsg = `Synced ${saved} new messages.`;
+    } catch (e) {
+      syncMsg = `Sync failed: ${e}`;
+    } finally {
+      syncingMsgs = false;
+      await loadConversations();
+    }
+  }
+
+  $effect(() => {
+    const v = $startupSync.version;
+    if (v > 0 && v !== prevVersion) {
+      loadConversations();
+    }
+    prevVersion = v;
+  });
 
   async function selectConversation(conv: Conversation) {
     selectedConv = conv.id;
@@ -60,9 +86,15 @@
   </div>
 
   <div class="inbox-toolbar">
+    <button class="btn btn-primary" onclick={syncMessages} disabled={syncingMsgs}>
+      {syncingMsgs ? 'Syncing…' : 'Sync messages'}
+    </button>
     <button class="btn btn-ghost" onclick={loadConversations} disabled={loading}>
       {loading ? '...' : 'Refresh'}
     </button>
+    {#if syncMsg}
+      <span class="sync-msg">{syncMsg}</span>
+    {/if}
   </div>
 
   <div class="inbox-layout">
@@ -121,9 +153,12 @@
   .inbox-subtitle { font-size: 0.85rem; color: var(--fg-muted); margin: 0.25rem 0 0 0; }
   .inbox-toolbar { display: flex; gap: 0.5rem; margin-bottom: 1rem; align-items: center; }
   .btn { padding: 0.4rem 0.85rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem; transition: all 0.15s; cursor: pointer; }
+  .btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-ghost { background: transparent; color: var(--fg-muted); }
   .btn-ghost:hover { background: var(--bg); color: var(--fg); }
   .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+  .sync-msg { font-size: 0.8rem; color: var(--fg-muted); }
   .inbox-layout { display: grid; grid-template-columns: 260px 1fr; gap: 1rem; min-height: 400px; }
   .conv-list { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 0.5rem; max-height: 500px; overflow-y: auto; }
   .conv-item { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; border-radius: var(--radius); cursor: pointer; transition: background 0.1s; }

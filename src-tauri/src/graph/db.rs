@@ -51,11 +51,15 @@ impl SocialGraph {
                 author_username TEXT NOT NULL,
                 content TEXT NOT NULL,
                 media_urls TEXT NOT NULL DEFAULT '[]',
+                poster_url TEXT,
                 liker_ids TEXT NOT NULL DEFAULT '[]',
                 commenter_ids TEXT NOT NULL DEFAULT '[]',
                 timestamp INTEGER NOT NULL,
                 is_video INTEGER NOT NULL DEFAULT 0,
+                author_is_mutual INTEGER,
+                author_is_close_friend INTEGER,
                 is_synthetic INTEGER,
+                seen INTEGER NOT NULL DEFAULT 0,
                 proximity_score REAL DEFAULT 0.0,
                 PRIMARY KEY (id, platform)
             );
@@ -85,7 +89,29 @@ impl SocialGraph {
             CREATE INDEX IF NOT EXISTS idx_posts_timestamp ON posts(timestamp);
             CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_messages_platform ON messages(platform);"
-        )
+        )?;
+        self.migrate_columns()
+    }
+
+    fn migrate_columns(&self) -> Result<()> {
+        let existing: Vec<String> = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(posts)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        for col in ["author_is_mutual", "author_is_close_friend", "seen", "poster_url"] {
+            if !existing.iter().any(|c| c == col) {
+                if col == "poster_url" {
+                    self.conn.execute_batch("ALTER TABLE posts ADD COLUMN poster_url TEXT;")?;
+                } else {
+                    self.conn.execute_batch(&format!(
+                        "ALTER TABLE posts ADD COLUMN {} INTEGER;",
+                        col
+                    ))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn upsert_user(&self, user: &SocialUser) -> Result<()> {
@@ -189,12 +215,16 @@ impl SocialGraph {
 
         self.conn.execute(
             "INSERT OR REPLACE INTO posts (id, platform, author_id, author_username, content,
-             media_urls, liker_ids, commenter_ids, timestamp, is_video, is_synthetic, proximity_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             media_urls, poster_url, liker_ids, commenter_ids, timestamp, is_video,
+             author_is_mutual, author_is_close_friend, is_synthetic, proximity_score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 post.id, platform_int, post.author_id, post.author_username, post.content,
-                media_json, liker_json, commenter_json, post.timestamp,
-                post.is_video as i32, post.is_synthetic, proximity,
+                media_json, post.poster_url, liker_json, commenter_json, post.timestamp,
+                post.is_video as i32,
+                post.author_is_mutual.map(|v| v as i32),
+                post.author_is_close_friend.map(|v| v as i32),
+                post.is_synthetic, proximity,
             ],
         )?;
         Ok(())
@@ -245,9 +275,10 @@ impl SocialGraph {
         let platform_int = platform_to_int(platform);
         let mut stmt = self.conn.prepare(
             "SELECT id, platform, author_id, author_username, content,
-                    media_urls, liker_ids, commenter_ids, timestamp, is_video, is_synthetic
+                    media_urls, poster_url, liker_ids, commenter_ids, timestamp, is_video,
+                    author_is_mutual, author_is_close_friend, is_synthetic
              FROM posts
-             WHERE platform = ?1 AND is_synthetic IS NOT 1
+             WHERE platform = ?1 AND is_synthetic IS NOT 1 AND seen IS NOT 1
              ORDER BY proximity_score DESC, timestamp DESC
              LIMIT ?2"
         )?;
@@ -259,11 +290,14 @@ impl SocialGraph {
             let author_username: String = row.get(3)?;
             let content: String = row.get(4)?;
             let media_str: String = row.get(5)?;
-            let liker_str: String = row.get(6)?;
-            let commenter_str: String = row.get(7)?;
-            let timestamp: u64 = row.get(8)?;
-            let is_video: i32 = row.get(9)?;
-            let is_synthetic: Option<i32> = row.get(10)?;
+            let poster_url: Option<String> = row.get(6)?;
+            let liker_str: String = row.get(7)?;
+            let commenter_str: String = row.get(8)?;
+            let timestamp: u64 = row.get(9)?;
+            let is_video: i32 = row.get(10)?;
+            let author_is_mutual: Option<i32> = row.get(11)?;
+            let author_is_close_friend: Option<i32> = row.get(12)?;
+            let is_synthetic: Option<i32> = row.get(13)?;
 
             Ok(Post {
                 id,
@@ -272,10 +306,13 @@ impl SocialGraph {
                 author_username,
                 content,
                 media_urls: serde_json::from_str(&media_str).unwrap_or_default(),
+                poster_url,
                 liker_ids: serde_json::from_str(&liker_str).unwrap_or_default(),
                 commenter_ids: serde_json::from_str(&commenter_str).unwrap_or_default(),
                 timestamp,
                 is_video: is_video != 0,
+                author_is_mutual: author_is_mutual.map(|v| v != 0),
+                author_is_close_friend: author_is_close_friend.map(|v| v != 0),
                 engagement_score: None,
                 is_synthetic: is_synthetic.map(|v| v != 0),
                 vector_embedding: None,
@@ -291,6 +328,17 @@ impl SocialGraph {
             "INSERT OR IGNORE INTO messages (id, platform, conversation_id, sender_id, content, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![msg.id, platform_int, msg.conversation_id, msg.sender_id, msg.content, msg.timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_conversation(&self, conv: &crate::types::Conversation) -> Result<()> {
+        let platform_int = platform_to_int(&conv.platform);
+        let participants_json = serde_json::to_string(&conv.participants).unwrap_or_default();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO conversations (id, platform, participants, last_message_at, unread)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![conv.id, platform_int, participants_json, conv.last_message_at, conv.unread as i32],
         )?;
         Ok(())
     }
@@ -376,6 +424,15 @@ impl SocialGraph {
         })?;
 
         convs.collect()
+    }
+
+    pub fn mark_post_seen(&self, platform: &Platform, post_id: &str) -> Result<()> {
+        let platform_int = platform_to_int(platform);
+        self.conn.execute(
+            "UPDATE posts SET seen = 1 WHERE id = ?1 AND platform = ?2",
+            params![post_id, platform_int],
+        )?;
+        Ok(())
     }
 }
 
@@ -619,10 +676,13 @@ mod tests {
             author_username: "author".into(),
             content: "hello".into(),
             media_urls: vec![],
+            poster_url: None,
             liker_ids: vec!["mutual1".into(), "author1".into(), "user2".into()],
             commenter_ids: vec!["mutual1".into()],
             timestamp: now - 60,
             is_video: false,
+            author_is_mutual: Some(true),
+            author_is_close_friend: Some(false),
             engagement_score: None,
             is_synthetic: None,
             vector_embedding: None,
@@ -642,10 +702,13 @@ mod tests {
             author_username: "user1".into(),
             content: "test content".into(),
             media_urls: vec![],
+            poster_url: None,
             liker_ids: vec!["u1".into(), "u2".into()],
             commenter_ids: vec!["u1".into()],
             timestamp: 1000,
             is_video: false,
+            author_is_mutual: Some(true),
+            author_is_close_friend: Some(true),
             engagement_score: None,
             is_synthetic: Some(false),
             vector_embedding: None,
@@ -662,15 +725,17 @@ mod tests {
         let graph = SocialGraph::open("").unwrap();
         let real = Post {
             id: "p1".into(), platform: Platform::Instagram, author_id: "a1".into(),
-            author_username: "u1".into(), content: "real".into(), media_urls: vec![],
+            author_username: "u1".into(), content: "real".into(), media_urls: vec![], poster_url: None,
             liker_ids: vec![], commenter_ids: vec![], timestamp: 1000,
-            is_video: false, engagement_score: None, is_synthetic: Some(false), vector_embedding: None,
+            is_video: false, author_is_mutual: Some(false), author_is_close_friend: Some(false),
+            engagement_score: None, is_synthetic: Some(false), vector_embedding: None,
         };
         let synth = Post {
             id: "p2".into(), platform: Platform::Instagram, author_id: "a2".into(),
-            author_username: "u2".into(), content: "fake".into(), media_urls: vec![],
+            author_username: "u2".into(), content: "fake".into(), media_urls: vec![], poster_url: None,
             liker_ids: vec![], commenter_ids: vec![], timestamp: 1001,
-            is_video: false, engagement_score: None, is_synthetic: Some(true), vector_embedding: None,
+            is_video: false, author_is_mutual: Some(false), author_is_close_friend: Some(false),
+            engagement_score: None, is_synthetic: Some(true), vector_embedding: None,
         };
         graph.save_post(&real).unwrap();
         graph.save_post(&synth).unwrap();
@@ -691,6 +756,41 @@ mod tests {
         let msgs = graph.get_messages("conv1", &Platform::Twitter).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "hello");
+    }
+
+    #[test]
+    fn test_save_conversation_roundtrip() {
+        let graph = SocialGraph::open("").unwrap();
+        let conv = crate::types::Conversation {
+            id: "conv1".into(),
+            platform: Platform::Instagram,
+            participants: vec!["alice".into(), "bob".into()],
+            last_message_at: 1700000000,
+            unread: true,
+        };
+        graph.save_conversation(&conv).unwrap();
+        let convs = graph.get_conversations(&Platform::Instagram).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].participants, vec!["alice".to_string(), "bob".to_string()]);
+        assert!(convs[0].unread);
+    }
+
+    #[test]
+    fn test_mutual_and_close_friend_roundtrip() {
+        let graph = SocialGraph::open("").unwrap();
+        let post = Post {
+            id: "p2".into(), platform: Platform::Instagram, author_id: "a2".into(),
+            author_username: "u2".into(), content: "post".into(), media_urls: vec![], poster_url: None,
+            liker_ids: vec![], commenter_ids: vec![], timestamp: 1001,
+            is_video: true, author_is_mutual: Some(true), author_is_close_friend: Some(true),
+            engagement_score: None, is_synthetic: Some(false), vector_embedding: None,
+        };
+        graph.save_post(&post).unwrap();
+        let posts = graph.get_posts_by_proximity(&Platform::Instagram, 10).unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].author_is_mutual, Some(true));
+        assert_eq!(posts[0].author_is_close_friend, Some(true));
+        assert!(posts[0].is_video);
     }
 
     #[test]
