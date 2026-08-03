@@ -6,12 +6,26 @@ use super::PlatformIngester;
 
 const API_BASE: &str = "https://www.linkedin.com/voyager/api";
 
+// Feed query hashes observed in the web client; the client rotates them, so we
+// discover a fresh one at runtime and fall back to these when unavailable.
+const KNOWN_FEED_QUERY_HASHES: [&str; 2] = [
+    "7a50ef8ba5a7865c23ad5df46f735709",
+    "923020905727c01516495a0ac90bb475",
+];
+
 fn normalize_ts(raw: u64) -> u64 {
     if raw > 1_000_000_000_000 {
         raw / 1_000
     } else {
         raw
     }
+}
+
+fn feed_query_id_from_text(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"voyagerFeedDashMainFeed\.([0-9a-f]{16,})").ok()?;
+    re.captures(text)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 pub struct LinkedInIngester;
@@ -147,6 +161,204 @@ impl LinkedInIngester {
         })
     }
 
+    fn parse_graphql_feed(&self, body: &serde_json::Value) -> Vec<Post> {
+        let mut posts: Vec<Post> = Vec::new();
+        let feed = &body["data"]["data"]["feedDashMainFeedByMainFeed"];
+        let feed = if feed.is_null() {
+            &body["data"]["data"]["feedDashMainFeed"]
+        } else {
+            feed
+        };
+
+        // element references are urns (strings) in the GraphQL response
+        let mut refs: Vec<String> = Vec::new();
+        if let Some(els) = feed["*elements"].as_array() {
+            for e in els {
+                if let Some(a) = e.get("activity") {
+                    if let Some(p) = self.parse_activity(a) {
+                        if !posts.iter().any(|p2| p2.id == p.id) {
+                            posts.push(p);
+                        }
+                    }
+                }
+                if let Some(s) = e.as_str() {
+                    refs.push(s.to_string());
+                } else if let Some(u) = e["entityUrn"].as_str().or_else(|| e["$urn"].as_str()) {
+                    refs.push(u.to_string());
+                }
+            }
+        }
+
+        let included = body["included"]
+            .as_array()
+            .or_else(|| body["data"]["included"].as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+
+        for item in included {
+            let urn = item["entityUrn"].as_str()
+                .or_else(|| item["$urn"].as_str())
+                .or_else(|| item["urn"].as_str())
+                .unwrap_or("");
+            if !refs.iter().any(|r| r == urn) {
+                continue;
+            }
+            if let Some(post) = self.parse_update(item) {
+                if !posts.iter().any(|p| p.id == post.id) {
+                    posts.push(post);
+                }
+            }
+        }
+        posts
+    }
+
+    fn parse_update(&self, item: &serde_json::Value) -> Option<Post> {
+        let update = item.get("updateV2").filter(|v| !v.is_null()).unwrap_or(item);
+        let urn = item["$urn"].as_str()
+            .or_else(|| item["entityUrn"].as_str())
+            .or_else(|| item["urn"].as_str())?;
+        let id = urn.rsplit(':').next()?.to_string();
+
+        let content = update["commentary"]["commentary"]["text"].as_str()
+            .or_else(|| update["commentary"]["text"].as_str())
+            .or_else(|| update["summary"]["text"].as_str())
+            .or_else(|| update["headline"]["text"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let actor_urn = update["actor"].as_str()
+            .or_else(|| update["actor"]["$urn"].as_str())
+            .or_else(|| update["actor"]["urn"].as_str())
+            .unwrap_or("");
+        let author_id = actor_urn.rsplit(':').next().unwrap_or("").to_string();
+        let author_username = update["actorName"].as_str()
+            .or_else(|| update["actor"]["name"].as_str())
+            .or_else(|| update["actor"]["miniProfile"]["publicIdentifier"].as_str())
+            .unwrap_or(&author_id)
+            .to_string();
+
+        let timestamp = normalize_ts(update["*metadata"]["time"].as_i64().unwrap_or(0) as u64);
+
+        let mut media_urls = Vec::new();
+        let is_video = update["content"]["video"].is_object()
+            || update["content"]["type"].as_str() == Some("video")
+            || update["type"].as_str() == Some("video");
+        if let Some(imgs) = update["content"]["images"].as_array() {
+            for i in imgs {
+                if let Some(u) = i["url"].as_str() {
+                    media_urls.push(u.to_string());
+                }
+            }
+        }
+        if is_video {
+            if let Some(pl) = update["content"]["playlists"].as_array() {
+                if let Some(f) = pl.first() {
+                    if let Some(u) = f["url"].as_str() {
+                        media_urls.push(u.to_string());
+                    }
+                }
+            }
+        }
+
+        let liker_ids: Vec<String> = update["likes"]["elements"].as_array()
+            .map(|els| {
+                els.iter()
+                    .filter_map(|e| e["actor"].as_str())
+                    .filter_map(|u| u.rsplit(':').next().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Some(Post {
+            id,
+            platform: Platform::LinkedIn,
+            author_id,
+            author_username,
+            content,
+            media_urls,
+            poster_url: None,
+            liker_ids,
+            commenter_ids: Vec::new(),
+            timestamp,
+            is_video,
+            author_is_mutual: None,
+            author_is_close_friend: None,
+            engagement_score: None,
+            is_synthetic: None,
+            vector_embedding: None,
+        })
+    }
+
+    async fn discover_feed_query_id(&self, client: &HttpClient, csrf: &str) -> Option<String> {
+        let page_url = "https://www.linkedin.com/feed/";
+        let resp = client.client()
+            .get(page_url)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Csrf-Token", csrf)
+            .header("X-RestLi-Protocol-Version", "2.0.0")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", page_url)
+            .send()
+            .await
+            .ok()?;
+        let html = resp.text().await.ok()?;
+        if let Some(qid) = feed_query_id_from_text(&html) {
+            return Some(qid);
+        }
+
+        // fall back to scanning bundle URLs referenced by the page
+        let script_re = regex::Regex::new(r#"<script[^>]+src="([^"]+)""#).ok()?;
+        for cap in script_re.captures_iter(&html).take(4) {
+            let src = cap.get(1)?.as_str();
+            let url = if src.starts_with('/') {
+                format!("https://www.linkedin.com{}", src)
+            } else if src.starts_with("http") {
+                src.to_string()
+            } else {
+                continue;
+            };
+            let resp = client.client()
+                .get(url)
+                .header("Referer", "https://www.linkedin.com/feed/")
+                .send()
+                .await
+                .ok()?;
+            let js = resp.text().await.ok()?;
+            if let Some(qid) = feed_query_id_from_text(&js) {
+                return Some(qid);
+            }
+        }
+        None
+    }
+
+    async fn fetch_graphql_feed(&self, client: &HttpClient, csrf: &str) -> Option<Vec<Post>> {
+        let discovered = self.discover_feed_query_id(client, csrf).await;
+        let mut hashes: Vec<String> = Vec::new();
+        if let Some(q) = discovered {
+            hashes.push(q);
+        }
+        for h in &KNOWN_FEED_QUERY_HASHES {
+            hashes.push(h.to_string());
+        }
+
+        for hash in hashes {
+            let url = format!(
+                "{}/graphql?queryId=voyagerFeedDashMainFeed.{}&variables={}&csrfToken={}",
+                API_BASE,
+                hash,
+                urlencoding::encode("(start:0,count:10,sortOrder:MEMBER_SETTING)"),
+                urlencoding::encode(csrf)
+            );
+            if let Ok(body) = self.get_voyager(client, &url, csrf, "https://www.linkedin.com/feed/").await {
+                let posts = self.parse_graphql_feed(&body);
+                if !posts.is_empty() {
+                    return Some(posts);
+                }
+            }
+        }
+        None
+    }
+
     fn extract_profile(&self, body: &serde_json::Value) -> SocialUser {
         let id = body["data"]["user"]["urn"]
             .as_str()
@@ -239,6 +451,12 @@ impl PlatformIngester for LinkedInIngester {
         let client = self.build_client(credential);
         let csrf = self.csrf_token(credential);
 
+        // primary: rotating GraphQL feed (query id discovered from web client)
+        if let Some(posts) = self.fetch_graphql_feed(&client, &csrf).await {
+            return Ok(posts);
+        }
+
+        // fallback: legacy REST feed
         let url = format!(
             "{}/feed/dashUpdates?start=0&count=10&feedType=ALL&feedModuleType=HYPE_FEED&csrfToken={}",
             API_BASE,
@@ -564,5 +782,74 @@ mod tests {
     #[test]
     fn test_extract_messages_empty() {
         assert!(ing().extract_messages(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn test_feed_query_id_from_text() {
+        assert_eq!(
+            feed_query_id_from_text(
+                "window.__voyagerFeedDashMainFeedQueryId__='voyagerFeedDashMainFeed.7a50ef8ba5a7865c23ad5df46f735709';"
+            ),
+            Some("7a50ef8ba5a7865c23ad5df46f735709".to_string())
+        );
+        assert_eq!(feed_query_id_from_text("no query id here"), None);
+    }
+
+    #[test]
+    fn test_parse_graphql_feed_resolves_refs() {
+        let body = serde_json::json!({
+            "data": { "data": { "feedDashMainFeedByMainFeed": {
+                "*elements": [
+                    "urn:li:activity:111",
+                    "urn:li:activity:222",
+                    { "entityUrn": "urn:li:activity:333", "activity": {
+                        "$urn": "urn:li:activity:333",
+                        "summary": { "text": "inline element" },
+                        "temporal": { "time": 1_700_000_000_000i64 }
+                    } }
+                ]
+            } } },
+            "included": [
+                { "$urn": "urn:li:activity:111", "entityUrn": "urn:li:activity:111",
+                  "updateV2": {
+                      "commentary": { "commentary": { "text": "graphql post one" } },
+                      "actor": { "$urn": "urn:li:person:500", "miniProfile": { "publicIdentifier": "alice" } },
+                      "content": { "images": [ { "url": "https://cdn.example/i1.jpg" } ] },
+                      "*metadata": { "time": 1_700_000_000_000i64 }
+                  } },
+                { "$urn": "urn:li:activity:222",
+                  "updateV2": {
+                      "commentary": { "text": "graphql post two" },
+                      "actor": "urn:li:person:77",
+                      "content": { "type": "video", "playlists": [ { "url": "https://cdn.example/v.mp4" } ] },
+                      "*metadata": { "time": 1_700_000_100_000i64 }
+                  } },
+                { "$urn": "urn:li:person:500", "miniProfile": { "publicIdentifier": "alice" } }
+            ]
+        });
+
+        let posts = ing().parse_graphql_feed(&body);
+        assert_eq!(posts.len(), 3);
+
+        let one = posts.iter().find(|p| p.id == "111").unwrap();
+        assert_eq!(one.content, "graphql post one");
+        assert_eq!(one.author_id, "500");
+        assert_eq!(one.author_username, "alice");
+        assert_eq!(one.timestamp, 1_700_000_000u64);
+        assert_eq!(one.media_urls, vec!["https://cdn.example/i1.jpg"]);
+        assert_eq!(one.is_video, false);
+
+        let two = posts.iter().find(|p| p.id == "222").unwrap();
+        assert_eq!(two.content, "graphql post two");
+        assert_eq!(two.is_video, true);
+        assert_eq!(two.media_urls, vec!["https://cdn.example/v.mp4"]);
+
+        let three = posts.iter().find(|p| p.id == "333").unwrap();
+        assert_eq!(three.content, "inline element");
+    }
+
+    #[test]
+    fn test_parse_graphql_feed_empty() {
+        assert!(ing().parse_graphql_feed(&serde_json::json!({})).is_empty());
     }
 }
