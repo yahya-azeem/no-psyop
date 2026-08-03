@@ -170,3 +170,57 @@ fn crate_ensure_session(token: &str) -> String {
         format!("sessionid={}", token)
     }
 }
+
+#[tokio::test]
+#[ignore = "requires stored IG credential"]
+async fn probe_media_proxy_range_behavior() {
+    use no_pysop_lib::media;
+    use no_pysop_lib::store::SecureStore;
+    use no_pysop_lib::types::Platform;
+
+    let mut ing = InstagramIngester;
+    let cred = load_stored_credential();
+    let posts = ing.fetch_feed(&cred).await.expect("fetch_feed failed");
+    let url = posts
+        .iter()
+        .find(|p| p.is_video && !p.media_urls.is_empty())
+        .map(|p| p.media_urls[0].clone())
+        .expect("no reel in feed");
+
+    let store = SecureStore::new();
+    assert!(store.has_credential(&Platform::Instagram), "no stored cred");
+
+    let empty_headers = tauri::http::HeaderMap::new();
+    let no_range = media::proxy(&store, &url, &empty_headers);
+    match &no_range {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let cl = resp.headers().get("content-length").cloned();
+            let ct = resp.headers().get("content-type").cloned();
+            let len = resp.body().len();
+            println!(
+                "PROXY no-range: status={} content_type={:?} content_length={:?} body_bytes={}",
+                status, ct, cl, len
+            );
+        }
+        Err(e) => println!("PROXY no-range ERROR: {}", e),
+    }
+
+    let mut range_headers = tauri::http::HeaderMap::new();
+    range_headers.insert("range", "bytes=0-".parse().unwrap());
+    let open_range = media::proxy(&store, &url, &range_headers);
+    match &open_range {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let cl = resp.headers().get("content-length").cloned();
+            let cr = resp.headers().get("content-range").cloned();
+            let ct = resp.headers().get("content-type").cloned();
+            let len = resp.body().len();
+            println!(
+                "PROXY range=bytes=0-: status={} content_type={:?} content_range={:?} content_length={:?} body_bytes={}",
+                status, ct, cr, cl, len
+            );
+        }
+        Err(e) => println!("PROXY range=bytes=0- ERROR: {}", e),
+    }
+}

@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 
 pub mod types;
-mod store;
+pub mod store;
 mod graph;
 pub mod http;
 pub mod ingestion;
 mod ml;
 mod bridge;
 mod search;
-mod media;
+pub mod media;
 
 use std::sync::Mutex;
 use tauri::{Manager, State};
@@ -317,6 +317,42 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            use tauri::Manager;
+
+            let show = MenuItemBuilder::with_id("show", "Open no pysop").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+
+            TrayIconBuilder::with_id("no-pysop-tray")
+                .tooltip("no pysop")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            Ok(())
+        })
         .register_uri_scheme_protocol("media", |ctx, request: tauri::http::Request<Vec<u8>>| {
             let state = ctx.app_handle().state::<AppState>();
             let path = request.uri().path().trim_start_matches('/').to_string();
