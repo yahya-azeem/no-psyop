@@ -146,7 +146,7 @@ public final class WebSessionHost: NSObject, WKScriptMessageHandler {
         webView.configuration.websiteDataStore.removeData(
             ofTypes: [WKWebsiteDataTypeCookies, WKWebsiteDataTypeLocalStorage],
             modifiedSince: .distantPast
-        ) { _ in }
+        ) { }
     }
 
     // MARK: - WKScriptMessageHandler
