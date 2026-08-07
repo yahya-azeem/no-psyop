@@ -50,7 +50,7 @@ jobs:
           ruby scripts/ios/link_websession.rb
 
       - name: Build (simulator, unsigned)
-        run: bun run tauri ios build --target aarch64-apple-ios-sim
+        run: bun run tauri ios build --target aarch64-sim
 
       - name: Upload .app
         uses: actions/upload-artifact@v4
@@ -103,7 +103,7 @@ jobs:
       # Cast the manual signing creds Tauri's CLI reads at export time.
       # These are base64 of the .p12 and .mobileprovision (see tauri #9963).
       - name: Build signed .ipa (device)
-        run: bun run tauri ios build --target aarch64-apple-ios
+        run: bun run tauri ios build --target aarch64
         env:
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
@@ -114,5 +114,5 @@ jobs:
         with:
           name: OneMedia-signed
           path: |
-            src-tauri/target/aarch64-apple-ios/release/bundle/ios/OneMedia.ipa
+            src-tauri/target/aarch64-apple-ios/release/arm64/OneMedia.ipa
           if-no-files-found: warn
