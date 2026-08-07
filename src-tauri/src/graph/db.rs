@@ -15,6 +15,11 @@ impl SocialGraph {
         } else {
             Connection::open(path)?
         };
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        if !path.is_empty() {
+            let _ = conn.pragma_update(None, "journal_mode", "WAL");
+            let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        }
         let db = Self {
             conn,
             weights: ProximityWeights::default(),
@@ -134,6 +139,7 @@ impl SocialGraph {
         Ok(())
     }
 
+    #[allow(dead_code)] // graph analytics API reserved for future ranking features
     pub fn get_mutual_connections(&self, user_id: &UserId, platform: &Platform) -> Result<Vec<SocialUser>> {
         let platform_int = platform_to_int(platform);
         let mut stmt = self.conn.prepare(
@@ -196,6 +202,7 @@ impl SocialGraph {
         Ok(ids)
     }
 
+    #[allow(dead_code)] // graph analytics API reserved for future ranking features
     pub fn record_interaction(&self, user_id: &UserId, platform: &Platform, post_id: &str, interaction_type: u8, timestamp: u64) -> Result<()> {
         let platform_int = platform_to_int(platform);
         self.conn.execute(
@@ -324,6 +331,33 @@ impl SocialGraph {
             })
         })?;
 
+        posts.collect()
+    }
+
+    /// Full-text search over a post's content and author, restricted to an
+    /// optional platform. Returns newest-first matches (a lightweight FTS
+    /// substitute; see the `posts` table schema and `search_posts_text`).
+    pub fn search_posts_text(&self, query: &str, platform: Option<&Platform>, limit: usize) -> Result<Vec<Post>> {
+        let like = format!("%{}%", query.trim());
+        let mut sql = String::from(
+            "SELECT id, platform, author_id, author_username, content,
+                    media_urls, poster_url, liker_ids, commenter_ids, timestamp, is_video,
+                    author_is_mutual, author_is_close_friend, is_synthetic, engagement_score
+             FROM posts
+             WHERE content LIKE ?1 OR author_username LIKE ?1
+             ORDER BY timestamp DESC
+             LIMIT ?2",
+        );
+
+        let mut stmt = match platform {
+            Some(p) => {
+                sql = sql.replace("WHERE", &format!("WHERE platform = {} AND", platform_to_int(p)));
+                self.conn.prepare(&sql)?
+            }
+            None => self.conn.prepare(&sql)?,
+        };
+
+        let posts = stmt.query_map(params![like, limit as i64], move |row| parse_post_row(row))?;
         posts.collect()
     }
 
@@ -457,6 +491,45 @@ fn int_to_platform(i: i32) -> Platform {
     }
 }
 
+/// Map a `posts` row (the shared column projection) into a [`Post`]. Kept as a
+/// free function so every query over the posts table reuses the same parsing.
+fn parse_post_row(row: &rusqlite::Row) -> rusqlite::Result<Post> {
+    let id: String = row.get(0)?;
+    let plat_int: i32 = row.get(1)?;
+    let author_id: String = row.get(2)?;
+    let author_username: String = row.get(3)?;
+    let content: String = row.get(4)?;
+    let media_str: String = row.get(5)?;
+    let poster_url: Option<String> = row.get(6)?;
+    let liker_str: String = row.get(7)?;
+    let commenter_str: String = row.get(8)?;
+    let timestamp: u64 = row.get(9)?;
+    let is_video: i32 = row.get(10)?;
+    let author_is_mutual: Option<i32> = row.get(11)?;
+    let author_is_close_friend: Option<i32> = row.get(12)?;
+    let is_synthetic: Option<i32> = row.get(13)?;
+    let engagement_score: Option<f32> = row.get(14)?;
+
+    Ok(Post {
+        id,
+        platform: int_to_platform(plat_int),
+        author_id,
+        author_username,
+        content,
+        media_urls: serde_json::from_str(&media_str).unwrap_or_default(),
+        poster_url,
+        liker_ids: serde_json::from_str(&liker_str).unwrap_or_default(),
+        commenter_ids: serde_json::from_str(&commenter_str).unwrap_or_default(),
+        timestamp,
+        is_video: is_video != 0,
+        author_is_mutual: author_is_mutual.map(|v| v != 0),
+        author_is_close_friend: author_is_close_friend.map(|v| v != 0),
+        engagement_score,
+        is_synthetic: is_synthetic.map(|v| v != 0),
+        vector_embedding: None,
+    })
+}
+
 #[derive(Default)]
 struct ProximityScalars {
     mutual_likes: u32,
@@ -476,6 +549,7 @@ mod proximity {
         pub mutual_comment_weight: f32,
         pub non_mutual_penalty: f32,
         pub recency_weight: f32,
+        #[allow(dead_code)] // reserved; proximity weighting is partially tuned
         pub engagement_ratio_weight: f32,
     }
 
@@ -723,6 +797,49 @@ mod tests {
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].id, "p1");
         assert_eq!(posts[0].liker_ids, vec!["u1".to_string(), "u2".to_string()]);
+    }
+
+    #[test]
+    fn test_search_posts_text_cross_platform() {
+        let graph = SocialGraph::open("").unwrap();
+
+        let mk = |id: &str, platform: Platform, author: &str, content: &str, ts: u64| Post {
+            id: id.into(),
+            platform,
+            author_id: format!("a{}", id),
+            author_username: author.into(),
+            content: content.into(),
+            media_urls: vec![],
+            poster_url: None,
+            liker_ids: vec![],
+            commenter_ids: vec![],
+            timestamp: ts,
+            is_video: false,
+            author_is_mutual: None,
+            author_is_close_friend: None,
+            engagement_score: None,
+            is_synthetic: Some(false),
+            vector_embedding: None,
+        };
+
+        graph.save_post(&mk("ig1", Platform::Instagram, "alice", "dallas food trucks", 3000)).unwrap();
+        graph.save_post(&mk("tw1", Platform::Twitter, "bob", "great tacos in dallas", 2000)).unwrap();
+        graph.save_post(&mk("li1", Platform::LinkedIn, "cara", "productivity notes", 1000)).unwrap();
+
+        let all = graph.search_posts_text("dallas", None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, "ig1"); // newest first
+        assert_eq!(all[1].id, "tw1");
+
+        let ig = graph.search_posts_text("dallas", Some(&Platform::Instagram), 10).unwrap();
+        assert_eq!(ig.len(), 1);
+        assert_eq!(ig[0].id, "ig1");
+
+        let by_author = graph.search_posts_text("bob", None, 10).unwrap();
+        assert_eq!(by_author.len(), 1);
+        assert_eq!(by_author[0].id, "tw1");
+
+        assert!(graph.search_posts_text("nope", None, 10).unwrap().is_empty());
     }
 
     #[test]

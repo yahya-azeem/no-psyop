@@ -1,18 +1,21 @@
 <script lang="ts">
   import VideoPlayer from '$lib/components/VideoPlayer.svelte';
   import { proxiedMedia } from '$lib/media';
+  import { playWhenReady } from '$lib/video';
   import { invoke } from '@tauri-apps/api/core';
   import type { Comment, FeedItem } from '$lib/types';
 
   let { items, sectioned = false }: { items: FeedItem[]; sectioned?: boolean } = $props();
   let openIdx = $state(-1);
+  let slideIdx = $state(0);
   let comments = $state<Comment[]>([]);
   let commentsLoading = $state(false);
   let commentsError = $state('');
   let dismissed = $state(new Set<string>());
 
   let current = $derived(openIdx >= 0 && openIdx < items.length ? items[openIdx] : null);
-  let gridItems: FeedItem[] = $derived(items.filter((i) => !dismissed.has(i.post.id)));
+  let visibleAll: FeedItem[] = $derived(items.filter((i) => !dismissed.has(i.post.id)));
+  let gridItems: FeedItem[] = $derived(visibleAll.filter((i) => i.post.media_urls.length > 0));
 
   const VIRAL_THRESHOLD = 1000;
 
@@ -26,12 +29,32 @@
 
   type Sec = { gi: number; item: FeedItem };
   let indexed: Sec[] = $derived(gridItems.map((item, gi) => ({ item, gi })));
-  let famSec = $derived(indexed.filter((s) => isFamily(s.item)));
+
+  function isCorporate(s: { item: FeedItem }) {
+    return s.item.post.platform === 'LinkedIn';
+  }
+
+  let corporateSec = $derived(
+    visibleAll
+      .filter(
+        (i) =>
+          isCorporate({ item: i }) &&
+          (i.post.author_is_mutual === true || i.relevance_score > 0)
+      )
+      .map((item) => ({ item }))
+  );
+  let famSec = $derived(
+    indexed.filter((s) => !isCorporate(s) && isFamily(s.item))
+  );
   let viralSec = $derived(
-    indexed.filter((s) => !isFamily(s.item) && (s.item.post.engagement_score ?? 0) >= VIRAL_THRESHOLD)
+    indexed.filter(
+      (s) => !isCorporate(s) && !isFamily(s.item) && (s.item.post.engagement_score ?? 0) >= VIRAL_THRESHOLD
+    )
   );
   let feedSec = $derived(
-    indexed.filter((s) => !isFamily(s.item) && (s.item.post.engagement_score ?? 0) < VIRAL_THRESHOLD)
+    indexed.filter(
+      (s) => !isCorporate(s) && !isFamily(s.item) && (s.item.post.engagement_score ?? 0) < VIRAL_THRESHOLD
+    )
   );
   let sections = $derived.by(() => {
     if (!sectioned) return [];
@@ -39,6 +62,7 @@
       { title: 'Feed', sub: 'posts from your networks', entries: feedSec },
       { title: 'Friends & Family', sub: 'mutuals and close friends', entries: famSec },
       { title: 'Viral for you', sub: 'high engagement', entries: viralSec },
+      { title: 'Corporate', sub: 'from LinkedIn', entries: corporateSec },
     ].filter((s) => s.entries.length > 0);
   });
 
@@ -58,6 +82,7 @@
   $effect(() => {
     const c = current;
     if (c) {
+      slideIdx = 0;
       loadComments(c.post.id);
     } else {
       comments = [];
@@ -84,7 +109,7 @@
   function playHover(e: MouseEvent) {
     const v = e.currentTarget as HTMLVideoElement;
     v.muted = true;
-    v.play().catch(() => {});
+    playWhenReady(v);
   }
 
   function pauseHover(e: MouseEvent) {
@@ -98,19 +123,16 @@
     el.style.display = 'none';
   }
 
-  function toggleGridVideo(e: MouseEvent) {
-    e.stopPropagation();
-    const v = e.currentTarget as HTMLVideoElement;
-    if (v.paused) {
-      v.muted = false;
-      v.play().catch(() => {});
-    } else {
-      v.pause();
-    }
-  }
-
   function open(i: number) {
     const it = gridItems[i];
+    if (!it) return;
+    openIdx = items.indexOf(it);
+    dismissed.add(it.post.id);
+    invoke('mark_post_seen', { platform: it.post.platform, postId: it.post.id }).catch(() => {});
+  }
+
+  function openItem(it: FeedItem) {
+    if (!it) return;
     openIdx = items.indexOf(it);
     dismissed.add(it.post.id);
     invoke('mark_post_seen', { platform: it.post.platform, postId: it.post.id }).catch(() => {});
@@ -127,6 +149,24 @@
   function close() {
     openIdx = -1;
   }
+
+  function mediaCount(p: { media_urls: string[] }) {
+    return p.media_urls.length;
+  }
+
+  function nextSlide() {
+    if (!current) return;
+    const n = current.post.media_urls.length;
+    if (n < 2) return;
+    slideIdx = (slideIdx + 1) % n;
+  }
+
+  function prevSlide() {
+    if (!current) return;
+    const n = current.post.media_urls.length;
+    if (n < 2) return;
+    slideIdx = (slideIdx - 1 + n) % n;
+  }
 </script>
 
 <div class="media-grid">
@@ -138,12 +178,12 @@
           <span class="section-sub">{sec.sub}</span>
         </div>
         <div class="grid-row">
-          {#each sec.entries as { gi, item }}
+          {#each sec.entries as { item }}
             <button
               class="grid-cell"
               class:is-video={item.post.is_video}
               class:color={isColor(item)}
-              onclick={() => open(gi)}
+              onclick={() => openItem(item)}
               aria-label={item.post.content || `${item.post.author_username} post`}
             >
               {#if item.post.media_urls[0]}
@@ -153,10 +193,9 @@
                     poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
                     muted
                     playsinline
-                    preload="metadata"
+                    preload="auto"
                     onmouseenter={playHover}
                     onmouseleave={pauseHover}
-                    onclick={toggleGridVideo}
                     onerror={onMediaError}
                   ></video>
                   <span class="cell-badge">▶</span>
@@ -167,6 +206,9 @@
                     loading="lazy"
                     onerror={onMediaError}
                   />
+                  {#if item.post.media_urls.length > 1}
+                    <span class="cell-count">{item.post.media_urls.length}</span>
+                  {/if}
                 {/if}
               {:else}
                 <span class="cell-text">{item.post.content}</span>
@@ -195,10 +237,9 @@
               poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
               muted
               playsinline
-              preload="metadata"
+              preload="auto"
               onmouseenter={playHover}
               onmouseleave={pauseHover}
-              onclick={toggleGridVideo}
               onerror={onMediaError}
             ></video>
             <span class="cell-badge">▶</span>
@@ -209,6 +250,9 @@
               loading="lazy"
               onerror={onMediaError}
             />
+            {#if item.post.media_urls.length > 1}
+              <span class="cell-count">{item.post.media_urls.length}</span>
+            {/if}
           {/if}
         {:else}
           <span class="cell-text">{item.post.content}</span>
@@ -249,8 +293,24 @@
         {#if current.post.media_urls[0]}
           {#if current.post.is_video}
             <VideoPlayer src={proxiedMedia(current.post.media_urls[0])} autoplay />
-          {:else}
+          {:else if current.post.media_urls.length === 1}
             <img src={proxiedMedia(current.post.media_urls[0])} alt="" />
+          {:else}
+            <div class="slide-wrap">
+              <img src={proxiedMedia(current.post.media_urls[slideIdx])} alt="" />
+              <button class="slide-nav prev" onclick={prevSlide} aria-label="previous slide">‹</button>
+              <button class="slide-nav next" onclick={nextSlide} aria-label="next slide">›</button>
+              <div class="slide-dots">
+                {#each current.post.media_urls as _, i}
+                  <button
+                    class="slide-dot"
+                    class:active={slideIdx === i}
+                    onclick={() => slideIdx = i}
+                    aria-label={`slide ${i + 1}`}
+                  ></button>
+                {/each}
+              </div>
+            </div>
           {/if}
         {:else}
           <p class="lightbox-text">{current.post.content}</p>
@@ -259,7 +319,17 @@
       <div class="lightbox-info">
         <div class="lightbox-header">
           <span class="lightbox-platform">{current.post.platform}</span>
-          <span class="lightbox-author">{current.post.author_username}</span>
+          {#if current.post.platform === 'LinkedIn' && current.post.author_username}
+            <a
+              class="lightbox-author"
+              href={`https://www.linkedin.com/in/${current.post.author_username}/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onclick={(e) => e.stopPropagation()}
+            >@{current.post.author_username}</a>
+          {:else}
+            <span class="lightbox-author">{current.post.author_username}</span>
+          {/if}
           {#if current.post.author_is_close_friend}
             <span class="friend-badge close">close friend</span>
           {:else if current.post.author_is_mutual}
@@ -441,6 +511,67 @@
     max-height: 55vh;
     object-fit: contain;
     display: block;
+  }
+  .slide-wrap {
+    position: relative;
+    width: 100%;
+    max-height: 55vh;
+  }
+  .slide-wrap img {
+    width: 100%;
+    max-height: 55vh;
+    object-fit: contain;
+    display: block;
+  }
+  .slide-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 1.3rem;
+    line-height: 1;
+    cursor: pointer;
+    z-index: 2;
+  }
+  .slide-nav.prev { left: 0.5rem; }
+  .slide-nav.next { right: 0.5rem; }
+  .slide-nav:hover { background: rgba(0, 0, 0, 0.8); }
+  .slide-dots {
+    position: absolute;
+    bottom: 0.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 0.4rem;
+    z-index: 2;
+  }
+  .slide-dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    background: transparent;
+    cursor: pointer;
+    padding: 0;
+  }
+  .slide-dot.active { background: #fff; }
+  .cell-count {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    min-width: 1.4rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 0.7rem;
+    text-align: center;
+    pointer-events: none;
   }
   .lightbox-text {
     padding: 2rem;

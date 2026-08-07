@@ -32,6 +32,18 @@
   }
 }
 
+/* Scale the content column with the window width so fullscreen windows use the
+   available space and narrow/"sidescreen" windows stay compact. */
+@media (min-width: 1000px) {
+  :root { --max-width: 880px; }
+}
+@media (min-width: 1300px) {
+  :root { --max-width: 1080px; }
+}
+@media (min-width: 1600px) {
+  :root { --max-width: 1280px; }
+}
+
 html {
   font-size: 15px;
   -webkit-text-size-adjust: 100%;

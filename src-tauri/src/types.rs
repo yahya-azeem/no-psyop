@@ -4,7 +4,7 @@ pub type UserId = String;
 pub type PostId = String;
 pub type SessionId = String;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Platform {
     Instagram,
     Twitter,

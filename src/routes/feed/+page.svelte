@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { onMount } from 'svelte';
   import MediaGrid from '$lib/components/MediaGrid.svelte';
   import NewsRow from '$lib/components/NewsRow.svelte';
   import StoriesTray from '$lib/components/StoriesTray.svelte';
@@ -8,17 +9,16 @@
   import type { FeedItem, SyncResult } from '$lib/types';
 
   let items = $derived($visiblePosts);
-  let searchQuery = $state('');
-  let searchResults = $state<string[]>([]);
-  let searching = $state(false);
   let syncing = $state(false);
   let syncMsg = $state('');
 
-  let igQuery = $state('');
-  let igResults = $state<FeedItem[]>([]);
-  let igSearching = $state(false);
-
   let prevVersion = $state($startupSync.version);
+
+  // Load the cached feed immediately so stored posts render before any sync
+  // network work happens; the effect below then refreshes once a sync lands.
+  onMount(() => {
+    fetchFeed();
+  });
 
   $effect(() => {
     const v = $startupSync.version;
@@ -32,7 +32,7 @@
     syncing = true;
     syncMsg = '';
     try {
-      const result = await invoke<SyncResult>('sync_all');
+      const result = await invoke<SyncResult>('sync_all', { force: true });
       syncMsg = `Synced ${result.posts_added} posts.`;
       if (result.errors.length > 0) {
         syncMsg += ` Errors: ${result.errors.join('; ')}`;
@@ -60,39 +60,6 @@
       console.error('fetch feed failed', e);
     } finally {
       isFetching.set(false);
-    }
-  }
-
-  async function doSearch() {
-    if (!searchQuery.trim()) return;
-    searching = true;
-    try {
-      searchResults = await invoke<string[]>('search_posts', {
-        query: searchQuery,
-        platform: null,
-      });
-    } catch (e) {
-      console.error('search failed', e);
-    } finally {
-      searching = false;
-    }
-  }
-
-  async function doIgSearch() {
-    if (!igQuery.trim()) return;
-    igSearching = true;
-    igResults = [];
-    try {
-      const posts = await invoke<any[]>('search_instagram', { query: igQuery });
-      igResults = posts.map((p: any) => ({
-        post: p,
-        proximity_score: 0,
-        relevance_score: 1,
-      }));
-    } catch (e) {
-      console.error('ig search failed', e);
-    } finally {
-      igSearching = false;
     }
   }
 </script>
@@ -123,58 +90,9 @@
     <button class="btn btn-ghost" onclick={clearFeed}>Clear</button>
   </div>
 
-  <details class="search-section">
-    <summary class="search-summary">Search indexed posts</summary>
-    <div class="search-area">
-      <div class="search-row">
-        <input
-          type="text"
-          placeholder="Search indexed posts…"
-          bind:value={searchQuery}
-          onkeydown={(e) => e.key === 'Enter' && doSearch()}
-          class="search-input"
-        />
-        <button class="btn btn-ghost" onclick={doSearch} disabled={searching || !searchQuery.trim()}>
-          {searching ? '…' : 'Search'}
-        </button>
-      </div>
-      {#if searchResults.length > 0}
-        <div class="search-results">
-          <span class="search-label">Found {searchResults.length} results</span>
-          <ul>
-            {#each searchResults as id}
-              <li class="search-hit">{id}</li>
-            {/each}
-          </ul>
-          <button class="btn btn-ghost btn-small" onclick={() => searchResults = []}>Clear</button>
-        </div>
-      {/if}
-    </div>
-  </details>
-
-  <details class="search-section">
-    <summary class="search-summary">Instagram discovery</summary>
-    <div class="search-area">
-      <div class="search-row">
-        <input
-          type="text"
-          placeholder="Search Instagram for anything…"
-          bind:value={igQuery}
-          onkeydown={(e) => e.key === 'Enter' && doIgSearch()}
-          class="search-input"
-        />
-        <button class="btn btn-ghost" onclick={doIgSearch} disabled={igSearching || !igQuery.trim()}>
-          {igSearching ? '…' : 'Search IG'}
-        </button>
-      </div>
-      {#if igResults.length > 0}
-        <MediaGrid items={igResults} />
-      {/if}
-    </div>
-  </details>
+  <NewsRow />
 
   <div class="feed-grid">
-    <NewsRow items={items} />
     {#if items.length === 0 && !$isFetching}
       <div class="feed-empty">
         <p>No posts yet.</p>
@@ -200,15 +118,6 @@
   .feed-title { font-size: 1.5rem; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
   .feed-subtitle { font-size: 0.85rem; color: var(--fg-muted); margin: 0.25rem 0 0 0; }
   .sync-bar { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.5rem 0.75rem; font-size: 0.85rem; margin-bottom: 1rem; }
-  .search-section { margin-bottom: 1rem; }
-  .search-summary { cursor: pointer; font-size: 0.85rem; color: var(--accent); font-weight: 500; padding: 0.25rem 0; }
-  .search-area { padding: 0.5rem 0; }
-  .search-row { display: flex; gap: 0.5rem; }
-  .search-input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); color: var(--fg); font-size: 0.9rem; }
-  .search-results { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.85rem; }
-  .search-label { color: var(--fg-muted); font-size: 0.8rem; }
-  .search-results ul { margin: 0.25rem 0; padding-left: 1rem; }
-  .search-hit { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); }
   .feed-meta { margin-bottom: 1rem; }
   .feed-count { font-size: 0.8rem; color: var(--fg-muted); }
   .feed-actions { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
@@ -219,7 +128,6 @@
   .btn-ghost { background: transparent; color: var(--fg-muted); }
   .btn-ghost:hover { background: var(--bg); color: var(--fg); }
   .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-small { padding: 0.25rem 0.6rem; font-size: 0.75rem; }
   .feed-grid { margin-top: 0.5rem; }
   .feed-empty { text-align: center; padding: 3rem 0; color: var(--fg-muted); }
   .feed-empty-hint { font-size: 0.85rem; margin-top: 0.5rem; }

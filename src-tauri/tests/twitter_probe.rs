@@ -1,7 +1,12 @@
 use no_pysop_lib::ingestion::twitter::TwitterIngester;
+use no_pysop_lib::ingestion::linkedin::LinkedInIngester;
 use no_pysop_lib::ingestion::PlatformIngester;
 use no_pysop_lib::store::SecureStore;
 use no_pysop_lib::types::{Credential, Platform};
+
+fn linkedin_credential() -> Option<Credential> {
+    SecureStore::new().get_credential(&Platform::LinkedIn).ok().flatten()
+}
 
 fn env_credential() -> Option<Credential> {
     let cookie = std::env::var("TWITTER_COOKIE").ok()?;
@@ -73,6 +78,29 @@ async fn probe_twitter_profile() {
 
 #[tokio::test]
 #[ignore = "requires TWITTER_COOKIE"]
+async fn probe_twitter_news() {
+    let cred = load_credential();
+    let ing = TwitterIngester;
+    match ing.fetch_news(&cred, &["Polymarket", "AJEnglish"]).await {
+        Ok(posts) => {
+            println!("TWITTER NEWS posts: {}", posts.len());
+            for p in posts.iter().take(10) {
+                println!(
+                    "  id={} author={} media={} video={} :: {}",
+                    p.id,
+                    p.author_username,
+                    p.media_urls.len(),
+                    p.is_video,
+                    p.content.chars().take(64).collect::<String>()
+                );
+            }
+        }
+        Err(e) => println!("TWITTER NEWS ERROR: {}", e),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TWITTER_COOKIE"]
 async fn probe_twitter_inbox() {
     let cred = load_credential();
     let mut ing = TwitterIngester;
@@ -88,5 +116,57 @@ async fn probe_twitter_inbox() {
             }
         }
         Err(e) => println!("TWITTER INBOX ERROR: {}", e),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TWITTER_COOKIE"]
+async fn probe_twitter_search() {
+    let cred = load_credential();
+    let ing = TwitterIngester;
+    let q = std::env::var("TWITTER_SEARCH").unwrap_or_else(|_| "polymarket".into());
+    match ing.search_posts(&cred, &q).await {
+        Ok(posts) => {
+            println!("TWITTER SEARCH '{}' posts: {}", q, posts.len());
+            for p in posts.iter().take(10) {
+                println!(
+                    "  id={} author={} media={} video={} ts={} :: {}",
+                    p.id,
+                    p.author_username,
+                    p.media_urls.len(),
+                    p.is_video,
+                    p.timestamp,
+                    p.content.chars().take(64).collect::<String>()
+                );
+            }
+        }
+        Err(e) => println!("TWITTER SEARCH ERROR: {}", e),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires LINKEDIN_COOKIE"]
+async fn probe_linkedin_feed() {
+    let Some(cred) = linkedin_credential() else {
+        println!("LINKEDIN FEED ERROR: no stored LinkedIn credential");
+        return;
+    };
+    let mut ing = LinkedInIngester;
+    match ing.fetch_feed(&cred).await {
+        Ok(posts) => {
+            println!("LINKEDIN FEED posts: {}", posts.len());
+            for p in posts.iter().take(10) {
+                println!(
+                    "  id={} author={} media={} video={} ts={} :: {}",
+                    p.id,
+                    p.author_username,
+                    p.media_urls.len(),
+                    p.is_video,
+                    p.timestamp,
+                    p.content.chars().take(64).collect::<String>()
+                );
+            }
+        }
+        Err(e) => println!("LINKEDIN FEED ERROR: {}", e),
     }
 }

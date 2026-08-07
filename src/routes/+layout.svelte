@@ -7,8 +7,14 @@
   let active = $state('feed');
 
   onMount(() => {
-    runStartupSync();
+    // Defer the first sync so the cached feed paints before the browser work
+    // for news + feeds kicks off — avoids a CPU spike right at first render.
+    const t = setTimeout(() => runStartupSync(), 1500);
     startPeriodicSync();
+    return () => {
+      clearTimeout(t);
+      stopPeriodicSync();
+    };
   });
 
   onDestroy(() => {
@@ -34,6 +40,12 @@
          onclick={() => active = 'inbox'}>
         <span class="nav-icon">✉</span>
         <span>Inbox</span>
+      </a>
+
+      <a href="/search" class="nav-item" class:active={active === 'search'}
+         onclick={() => active = 'search'}>
+        <span class="nav-icon">⌕</span>
+        <span>Search</span>
       </a>
 
       <a href="/dashboard" class="nav-item" class:active={active === 'dashboard'}

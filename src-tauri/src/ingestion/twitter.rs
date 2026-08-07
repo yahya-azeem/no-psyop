@@ -26,6 +26,54 @@ impl TwitterIngester {
             }
         }
 
+        // UserTweets profile-timeline shape (same tweet result structure).
+        if let Some(instructions) = body["data"]["user"]["result"]["timeline"]["timeline"]["instructions"].as_array() {
+            for instruction in instructions {
+                if let Some(entries) = instruction["entries"].as_array() {
+                    for entry in entries {
+                        let result = &entry["content"]["itemContent"]["tweet_results"]["result"];
+                        if !result.is_null() {
+                            if let Some(post) = self.parse_tweet(result) {
+                                posts.push(post);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // SearchTimeline (live search results) shape.
+        if let Some(instructions) = body["data"]["search_by_timeline"]["timeline"]["timeline"]["instructions"].as_array() {
+            for instruction in instructions {
+                if let Some(entries) = instruction["entries"].as_array() {
+                    for entry in entries {
+                        let result = &entry["content"]["itemContent"]["tweet_results"]["result"];
+                        if !result.is_null() {
+                            if let Some(post) = self.parse_tweet(result) {
+                                posts.push(post);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // SearchTimeline current shape (search_by_raw_query).
+        if let Some(instructions) = body["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"].as_array() {
+            for instruction in instructions {
+                if let Some(entries) = instruction["entries"].as_array() {
+                    for entry in entries {
+                        let result = &entry["content"]["itemContent"]["tweet_results"]["result"];
+                        if !result.is_null() {
+                            if let Some(post) = self.parse_tweet(result) {
+                                posts.push(post);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(entries) = body["data"]["home"]["home_timeline_ur"]["instructions"].as_array() {
             for instruction in entries {
                 if let Some(entries) = instruction["entries"].as_array() {
@@ -92,7 +140,7 @@ impl TwitterIngester {
             .to_string();
         let timestamp = created_at_ts(&result["legacy"]);
 
-        let (media_urls, is_video) = extract_media(legacy);
+        let (media_urls, is_video, poster) = extract_media(legacy);
 
         let liker_ids: Vec<String> = legacy["favorited_by"]
             .as_array()
@@ -111,7 +159,7 @@ impl TwitterIngester {
             author_username: username,
             content: text,
             media_urls,
-            poster_url: None,
+            poster_url: poster,
             liker_ids,
             commenter_ids,
             timestamp,
@@ -134,7 +182,7 @@ impl TwitterIngester {
         let user_id = tweet["user_id_str"].as_str().unwrap_or("").to_string();
         let username = tweet["screen_name"].as_str().unwrap_or("").to_string();
         let timestamp = created_at_ts(tweet);
-        let (media_urls, is_video) = extract_media(tweet);
+        let (media_urls, is_video, poster) = extract_media(tweet);
 
         let liker_ids: Vec<String> = tweet["favorited_by"].as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -151,7 +199,7 @@ impl TwitterIngester {
             author_username: username,
             content: text,
             media_urls,
-            poster_url: None,
+            poster_url: poster,
             liker_ids,
             commenter_ids,
             timestamp,
@@ -275,30 +323,51 @@ fn created_at_ts(tweet: &serde_json::Value) -> u64 {
         / 1000) as u64
 }
 
-fn extract_media(tweet: &serde_json::Value) -> (Vec<String>, bool) {
-    let is_video = tweet["extended_entities"]["media"]
+fn extract_media(tweet: &serde_json::Value) -> (Vec<String>, bool, Option<String>) {
+    let media = tweet["extended_entities"]["media"]
         .as_array()
-        .map(|a| a.iter().any(|m| m["type"].as_str() == Some("video")))
-        .unwrap_or(false);
+        .or_else(|| tweet["entities"]["media"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let is_video = media
+        .iter()
+        .any(|m| matches!(m["type"].as_str(), Some("video") | Some("animated_gif")));
 
     let mut media_urls = Vec::new();
-    if let Some(media) = tweet["extended_entities"]["media"].as_array() {
-        for m in media {
-            if let Some(url) = m["media_url_https"].as_str().or(m["media_url"].as_str()) {
-                media_urls.push(url.to_string());
+    let mut poster = None;
+    for m in media {
+        let mtype = m["type"].as_str().unwrap_or("");
+        let thumb = m["media_url_https"].as_str().or(m["media_url"].as_str());
+        if mtype == "video" || mtype == "animated_gif" {
+            if poster.is_none() {
+                poster = thumb.map(String::from);
             }
-        }
-    }
-    if media_urls.is_empty() {
-        if let Some(media) = tweet["entities"]["media"].as_array() {
-            for m in media {
-                if let Some(url) = m["media_url_https"].as_str().or(m["media_url"].as_str()) {
-                    media_urls.push(url.to_string());
+            // Prefer the real, playable mp4 variant over the thumbnail jpg.
+            if let Some(variants) = m["video_info"]["variants"].as_array() {
+                let best = variants
+                    .iter()
+                    .filter(|v| v["content_type"].as_str() == Some("video/mp4"))
+                    .filter_map(|v| {
+                        v["url"]
+                            .as_str()
+                            .map(|u| (v["bitrate"].as_i64().unwrap_or(0), u.to_string()))
+                    })
+                    .max_by_key(|(bitrate, _)| *bitrate)
+                    .map(|(_, url)| url);
+                if let Some(url) = best {
+                    media_urls.push(url);
                 }
             }
+            if media_urls.is_empty() {
+                if let Some(u) = thumb {
+                    media_urls.push(u.to_string());
+                }
+            }
+        } else if let Some(url) = thumb {
+            media_urls.push(url.to_string());
         }
     }
-    (media_urls, is_video)
+    (media_urls, is_video, poster)
 }
 
 #[async_trait]
@@ -340,6 +409,39 @@ impl PlatformIngester for TwitterIngester {
 
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
         Ok(credential.clone())
+    }
+}
+
+impl TwitterIngester {
+    /// Fetch recent tweets from specific accounts (news sources) via their
+    /// profile timelines, deduplicated by tweet id and sorted newest-first.
+    pub async fn fetch_news(&self, credential: &Credential, sources: &[&str]) -> Result<Vec<Post>, String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut posts = Vec::new();
+        for handle in sources {
+            let body = XProxy::user_tweets(&credential.session_token, handle).await?;
+            for post in self.extract_tweets(&body) {
+                if post.author_username.eq_ignore_ascii_case(handle) && seen.insert(post.id.clone()) {
+                    posts.push(post);
+                }
+            }
+        }
+        posts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(posts)
+    }
+
+    /// Live search for `query` via the x.com search page, deduplicated and
+    /// sorted newest-first.
+    pub async fn search_posts(&self, credential: &Credential, query: &str) -> Result<Vec<Post>, String> {
+        let body = XProxy::search(&credential.session_token, query).await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut posts: Vec<Post> = self
+            .extract_tweets(&body)
+            .into_iter()
+            .filter(|p| seen.insert(p.id.clone()))
+            .collect();
+        posts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(posts)
     }
 }
 
@@ -402,6 +504,36 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_media_prefers_mp4_variant() {
+        let tweet = serde_json::json!({
+            "id_str": "3",
+            "full_text": "vid",
+            "user_id_str": "9",
+            "screen_name": "carol",
+            "timestamp_ms": 2000,
+            "extended_entities": {
+                "media": [
+                    {
+                        "type": "video",
+                        "media_url_https": "https://pbs.twimg.com/thumb.jpg",
+                        "video_info": {
+                            "variants": [
+                                { "content_type": "application/x-mpegURL", "url": "https://video.twimg.com/master.m3u8" },
+                                { "content_type": "video/mp4", "bitrate": 832000, "url": "https://video.twimg.com/hi.mp4" },
+                                { "content_type": "video/mp4", "bitrate": 256000, "url": "https://video.twimg.com/lo.mp4" }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+        let post = ing().parse_legacy_tweet(&tweet).expect("parsed");
+        assert!(post.is_video);
+        assert_eq!(post.media_urls, vec!["https://video.twimg.com/hi.mp4"]);
+        assert_eq!(post.poster_url.as_deref(), Some("https://pbs.twimg.com/thumb.jpg"));
+    }
+
+    #[test]
     fn test_parse_legacy_tweet_missing_id() {
         assert!(ing().parse_legacy_tweet(&serde_json::json!({})).is_none());
     }
@@ -424,6 +556,40 @@ mod tests {
         assert_eq!(posts.len(), 2);
         assert_eq!(posts[0].id, "10");
         assert_eq!(posts[1].content, "second");
+    }
+
+    #[test]
+fn test_extract_tweets_user_timeline() {
+        let body = serde_json::json!({
+            "data": { "user": { "result": { "timeline": { "timeline": { "instructions": [
+                { "type": "TimelineAddEntries", "entries": [
+                    { "content": { "itemContent": { "tweet_results": { "result": {
+                        "legacy": legacy_tweet("20", "from profile", "3", "polymarket", 3_000_000)
+                    } } } } }
+                ] }
+            ] } } } } }
+        });
+        let posts = ing().extract_tweets(&body);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, "20");
+        assert_eq!(posts[0].author_username, "polymarket");
+    }
+
+    #[test]
+    fn test_extract_tweets_search_timeline() {
+        let body = serde_json::json!({
+            "data": { "search_by_raw_query": { "search_timeline": { "timeline": { "instructions": [
+                { "type": "TimelineAddEntries", "entries": [
+                    { "content": { "itemContent": { "tweet_results": { "result": {
+                        "legacy": legacy_tweet("30", "search hit", "4", "found", 4_000_000)
+                    } } } } }
+                ] }
+            ] } } } }
+        });
+        let posts = ing().extract_tweets(&body);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, "30");
+        assert_eq!(posts[0].author_username, "found");
     }
 
     #[test]

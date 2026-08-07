@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::http::HttpClient;
+use crate::http::xproxy::XProxy;
 use crate::types::{Credential, Message, Platform, Post, SocialUser};
 use super::PlatformIngester;
 
@@ -40,6 +41,7 @@ impl LinkedInIngester {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)] // used by unit tests; requests authenticate via the cookie jar
     fn auth_header(&self, credential: &Credential) -> String {
         let token = credential.session_token
             .split(';')
@@ -448,24 +450,19 @@ impl PlatformIngester for LinkedInIngester {
     }
 
     async fn fetch_feed(&mut self, credential: &Credential) -> Result<Vec<Post>, String> {
-        let client = self.build_client(credential);
-        let csrf = self.csrf_token(credential);
-
-        // primary: rotating GraphQL feed (query id discovered from web client)
-        if let Some(posts) = self.fetch_graphql_feed(&client, &csrf).await {
-            return Ok(posts);
+        // Primary: rotating GraphQL feed + legacy REST feed via plain HTTP.
+        match self.http_feed(credential).await {
+            Ok(posts) if !posts.is_empty() => return Ok(posts),
+            _ => {}
         }
 
-        // fallback: legacy REST feed
-        let url = format!(
-            "{}/feed/dashUpdates?start=0&count=10&feedType=ALL&feedModuleType=HYPE_FEED&csrfToken={}",
-            API_BASE,
-            urlencoding::encode(&csrf)
-        );
-
-        let body = self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/feed/").await?;
-        let posts = self.parse_feed_items(&body);
-
+        // Fallback: LinkedIn rejects direct-HTTP feed calls (400/404), so scrape
+        // the authenticated browser feed through the sidecar instead.
+        let body = XProxy::linkedin_feed(&credential.session_token).await?;
+        let posts = self.parse_browser_feed(&body);
+        if posts.is_empty() {
+            return Err("linkedin feed returned no posts (HTTP + browser both empty)".into());
+        }
         Ok(posts)
     }
 
@@ -511,10 +508,20 @@ impl PlatformIngester for LinkedInIngester {
             urlencoding::encode(&csrf)
         );
 
-        let body = self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/messaging/").await?;
-        let msgs = self.extract_messages(&body);
+        // LinkedIn has been deprecating the Voyager REST messaging endpoint;
+        // fall back to the device-trusted browser inbox when it errors/empties.
+        match self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/messaging/").await {
+            Ok(body) => {
+                let msgs = self.extract_messages(&body);
+                if !msgs.is_empty() {
+                    return Ok(msgs);
+                }
+            }
+            Err(_) => {}
+        }
 
-        Ok(msgs)
+        let browser = XProxy::linkedin_messages().await?;
+        Ok(self.parse_browser_messages(&browser))
     }
 
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
@@ -531,6 +538,125 @@ impl PlatformIngester for LinkedInIngester {
 }
 
 impl LinkedInIngester {
+    /// Try the direct-HTTP feed paths (GraphQL discovery, then legacy REST).
+    async fn http_feed(&self, credential: &Credential) -> Result<Vec<Post>, String> {
+        let client = self.build_client(credential);
+        let csrf = self.csrf_token(credential);
+
+        // primary: rotating GraphQL feed (query id discovered from web client)
+        if let Some(posts) = self.fetch_graphql_feed(&client, &csrf).await {
+            return Ok(posts);
+        }
+
+        // fallback: legacy REST feed
+        let url = format!(
+            "{}/feed/dashUpdates?start=0&count=10&feedType=ALL&feedModuleType=HYPE_FEED&csrfToken={}",
+            API_BASE,
+            urlencoding::encode(&csrf)
+        );
+        let body = self.get_voyager(&client, &url, &csrf, "https://www.linkedin.com/feed/").await?;
+        Ok(self.parse_feed_items(&body))
+    }
+
+    /// Map a browser-scraped inbox (`messengerConversationsBySyncToken.elements`)
+    /// into `Message`s. Each conversation ships its latest message preview in
+    /// the response, which we turn into one inbox row.
+    fn parse_browser_messages(&self, body: &serde_json::Value) -> Vec<Message> {
+        let mut msgs = Vec::new();
+        let convs = body["data"]["messengerConversationsBySyncToken"]["elements"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for conv in convs {
+            let conv_id = conv["backendUrn"]
+                .as_str()
+                .or_else(|| conv["entityUrn"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let messages = conv["messages"]["elements"].as_array().cloned().unwrap_or_default();
+            let mut conv_msgs: Vec<Message> = messages
+                .into_iter()
+                .map(|m| {
+                    let id = m["backendUrn"]
+                        .as_str()
+                        .or_else(|| m["entityUrn"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let content = m["body"]["text"]
+                        .as_str()
+                        .or_else(|| m["renderContentFallbackText"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let sender = m["sender"]["entityUrn"].as_str()
+                        .or_else(|| m["actor"].as_str())
+                        .and_then(|u| u.rsplit(':').next())
+                        .unwrap_or("")
+                        .to_string();
+                    let ts = normalize_ts(m["deliveredAt"].as_u64().unwrap_or(0));
+                    Message {
+                        id,
+                        platform: Platform::LinkedIn,
+                        conversation_id: conv_id.clone(),
+                        sender_id: sender,
+                        content,
+                        timestamp: ts,
+                    }
+                })
+                .collect();
+            msgs.append(&mut conv_msgs);
+        }
+        msgs
+    }
+
+    /// Map the browser-scraped feed (`{"posts":[{...}]}`) into `Post`s.
+    fn parse_browser_feed(&self, body: &serde_json::Value) -> Vec<Post> {
+        let mut posts = Vec::new();
+        let Some(items) = body["posts"].as_array() else {
+            return posts;
+        };
+        for p in items {
+            let id = p["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            let author_username = p["username"].as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| p["author"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let author_id = p["author"].as_str().unwrap_or("").to_string();
+            let content = p["text"].as_str().unwrap_or("").to_string();
+            let is_video = p["is_video"].as_bool().unwrap_or(false);
+            let is_connection = p["is_connection"].as_bool().unwrap_or(false);
+            let timestamp = normalize_ts(p["timestamp"].as_u64().unwrap_or(0));
+            let media_urls: Vec<String> = p["media"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            let poster = media_urls.first().cloned();
+            posts.push(Post {
+                id,
+                platform: Platform::LinkedIn,
+                author_id,
+                author_username,
+                content,
+                media_urls,
+                poster_url: poster,
+                liker_ids: Vec::new(),
+                commenter_ids: Vec::new(),
+                timestamp,
+                is_video,
+                author_is_mutual: Some(is_connection),
+                author_is_close_friend: None,
+                engagement_score: None,
+                is_synthetic: None,
+                vector_embedding: None,
+            });
+        }
+        posts
+    }
+
     fn voyager_headers(&self, csrf: &str) -> Vec<(&'static str, String)> {
         vec![
             ("Accept", "application/vnd.linkedin.normalized+json+2.1".to_string()),
@@ -546,6 +672,7 @@ impl LinkedInIngester {
     }
 }
 
+#[cfg(test)]
 fn cred(session: &str) -> Credential {
     Credential {
         platform: Platform::LinkedIn,

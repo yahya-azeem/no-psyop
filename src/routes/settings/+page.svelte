@@ -53,6 +53,22 @@
     }
   }
 
+  async function doBrowserConnect(p: PlatformAuth) {
+    p.loading = true;
+    statusMsg = '';
+    try {
+      statusMsg = 'Opening LinkedIn in a browser window — sign in there once.';
+      await invoke('linkedin_connect');
+      await loadCredentials();
+      p.connected = true;
+      statusMsg = 'LinkedIn connected.';
+    } catch (e) {
+      statusMsg = `Failed: ${e}`;
+    } finally {
+      p.loading = false;
+    }
+  }
+
   async function doDisconnect(p: PlatformAuth) {
     p.loading = true;
     statusMsg = '';
@@ -99,21 +115,27 @@
                 {p.loading ? '...' : 'Disconnect'}
               </button>
             {:else}
-              <input
-                type="text"
-                placeholder="username"
-                bind:value={p.username}
-                class="input-small"
-              />
-              <input
-                type="password"
-                placeholder="session_token"
-                bind:value={p.sessionToken}
-                class="input-small"
-              />
-              <button class="btn btn-primary" onclick={() => doConnect(p)} disabled={p.loading || !p.sessionToken}>
-                {p.loading ? '...' : 'Connect'}
-              </button>
+              {#if p.platform === 'LinkedIn'}
+                <button class="btn btn-primary" onclick={() => doBrowserConnect(p)} disabled={p.loading}>
+                  {p.loading ? 'Opening browser…' : 'Connect via browser'}
+                </button>
+              {:else}
+                <input
+                  type="text"
+                  placeholder="username"
+                  bind:value={p.username}
+                  class="input-small"
+                />
+                <input
+                  type="password"
+                  placeholder="session_token"
+                  bind:value={p.sessionToken}
+                  class="input-small"
+                />
+                <button class="btn btn-primary" onclick={() => doConnect(p)} disabled={p.loading || !p.sessionToken}>
+                  {p.loading ? '...' : 'Connect'}
+                </button>
+              {/if}
             {/if}
           </div>
         </div>

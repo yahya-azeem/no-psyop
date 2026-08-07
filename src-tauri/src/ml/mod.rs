@@ -1,13 +1,11 @@
 pub mod detector;
 pub mod classifier;
-pub mod embedding;
 
 use crate::types::Post;
 
 pub struct MLPipeline {
     detector: detector::SyntheticDetector,
     classifier: classifier::BaitClassifier,
-    embedder: embedding::EmbeddingEngine,
 }
 
 impl MLPipeline {
@@ -15,7 +13,6 @@ impl MLPipeline {
         Self {
             detector: detector::SyntheticDetector::new(),
             classifier: classifier::BaitClassifier::new(),
-            embedder: embedding::EmbeddingEngine::new(),
         }
     }
 
@@ -29,33 +26,6 @@ impl MLPipeline {
             bait_score,
             should_filter,
         }
-    }
-
-    pub fn generate_embedding(&self, text: &str) -> Vec<f32> {
-        self.embedder.embed(text)
-    }
-
-    pub fn batch_filter(&self, posts: &[Post]) -> Vec<(Post, PostFilterResult)> {
-        posts.iter()
-            .map(|p| {
-                let result = self.filter_post(p);
-                (p.clone(), result)
-            })
-            .collect()
-    }
-
-    pub fn batch_embed_and_filter(&self, posts: &[Post]) -> Vec<(Post, PostFilterResult, Option<Vec<f32>>)> {
-        let mut results = Vec::new();
-        for post in posts {
-            let filter = self.filter_post(post);
-            let embedding = if !filter.should_filter {
-                Some(self.embedder.embed(&post.content))
-            } else {
-                None
-            };
-            results.push((post.clone(), filter, embedding));
-        }
-        results
     }
 }
 

@@ -1,8 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import { proxiedMedia } from '$lib/media';
-  import type { FeedItem } from '$lib/types';
-
-  let { items }: { items: FeedItem[] } = $props();
+  import type { Post } from '$lib/types';
 
   const NEWS_SOURCES: Record<string, string> = {
     polymarket: 'Polymarket',
@@ -11,18 +11,29 @@
     aljazeeraenglish: 'Al Jazeera',
   };
 
-  let news = $derived(
-    items
-      .filter((i) => {
-        const name = i.post.author_username?.toLowerCase();
-        return i.post.platform === 'Twitter' && name ? name in NEWS_SOURCES : false;
-      })
-      .sort((a, b) => b.post.timestamp - a.post.timestamp)
-      .slice(0, 15)
-  );
+  let news = $state<Post[]>([]);
+  let loading = $state(false);
+  let error = $state('');
 
-  function sourceLabel(item: FeedItem) {
-    return NEWS_SOURCES[item.post.author_username.toLowerCase()] ?? item.post.author_username;
+  async function load() {
+    loading = true;
+    error = '';
+    try {
+      news = await invoke<Post[]>('get_news');
+    } catch (e) {
+      error = String(e);
+      news = [];
+    } finally {
+      loading = false;
+    }
+  }
+
+  onMount(() => {
+    load();
+  });
+
+  function sourceLabel(post: Post) {
+    return NEWS_SOURCES[post.author_username.toLowerCase()] ?? post.author_username;
   }
 
   function formatTimestamp(ts: number) {
@@ -35,31 +46,54 @@
   }
 </script>
 
-{#if news.length > 0}
+{#if loading && news.length === 0}
+  <section class="news-section">
+    <div class="news-header">
+      <h3 class="news-title">News</h3>
+      <span class="news-sub">loading…</span>
+    </div>
+  </section>
+{:else if error && news.length === 0}
+  <section class="news-section">
+    <div class="news-header">
+      <h3 class="news-title">News</h3>
+      <span class="news-sub error">unavailable — connect Twitter / start the proxy</span>
+    </div>
+  </section>
+{:else if news.length > 0}
   <section class="news-section">
     <div class="news-header">
       <h3 class="news-title">News</h3>
       <span class="news-sub">live from Polymarket &amp; Al Jazeera</span>
+      <button class="news-refresh" onclick={() => load()}>refresh</button>
     </div>
     <div class="news-tray">
-      {#each news as item (item.post.id)}
-        <article class="news-card" aria-label={`${sourceLabel(item)}: ${item.post.content}`}>
+      {#each news as post (post.id)}
+        <article class="news-card {post.media_urls[0] && !post.is_video ? 'has-media' : 'text-only'}" aria-label={`${sourceLabel(post)}: ${post.content}`}>
           <div class="news-card-top">
-            <span class="news-source">{sourceLabel(item)}</span>
-            <span class="news-handle">@{item.post.author_username}</span>
-            <span class="news-time">{formatTimestamp(item.post.timestamp)}</span>
+            <span class="news-source">{sourceLabel(post)}</span>
+            <span class="news-handle">@{post.author_username}</span>
+            <span class="news-time">{formatTimestamp(post.timestamp)}</span>
           </div>
-          <p class="news-content">{item.post.content}</p>
-          {#if item.post.media_urls[0] && !item.post.is_video}
+          <p class="news-content">{post.content}</p>
+          {#if post.media_urls[0] && !post.is_video}
             <img
               class="news-thumb"
-              src={proxiedMedia(item.post.media_urls[0])}
+              src={proxiedMedia(post.media_urls[0])}
               alt=""
               loading="lazy"
             />
           {/if}
         </article>
       {/each}
+    </div>
+  </section>
+{:else}
+  <section class="news-section">
+    <div class="news-header">
+      <h3 class="news-title">News</h3>
+      <span class="news-sub">nothing here yet — refresh to pull latest</span>
+      <button class="news-refresh" onclick={() => load()}>refresh</button>
     </div>
   </section>
 {/if}
@@ -69,8 +103,21 @@
   .news-header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.75rem; }
   .news-title { font-size: 1rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
   .news-sub { font-size: 0.75rem; color: var(--fg-muted); }
+  .news-sub.error { color: var(--accent); }
+  .news-refresh {
+    margin-left: auto;
+    font-size: 0.72rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .news-refresh:hover { border-color: var(--accent); color: var(--accent); }
   .news-tray {
     display: flex;
+    align-items: flex-start;
     gap: 0.75rem;
     overflow-x: auto;
     padding-bottom: 0.5rem;
@@ -107,6 +154,10 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 6;
     line-clamp: 6;
+  }
+  .news-card.text-only .news-content {
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
   }
   .news-thumb {
     width: 100%;

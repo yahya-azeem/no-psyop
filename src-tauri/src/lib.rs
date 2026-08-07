@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 pub mod types;
 pub mod store;
@@ -6,24 +5,101 @@ mod graph;
 pub mod http;
 pub mod ingestion;
 mod ml;
+// Planned inbox-polling bridge; kept behind an allow until the messaging
+// aggregation feature is wired to the UI.
+#[allow(dead_code)]
 mod bridge;
-mod search;
 pub mod media;
+mod media_server;
 
+use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::State;
 use ingestion::PlatformIngester;
+
+/// The three platforms this app ingests from.
+const ALL_PLATFORMS: [types::Platform; 3] = [
+    types::Platform::Instagram,
+    types::Platform::Twitter,
+    types::Platform::LinkedIn,
+];
+
+/// Map a user-facing platform string (as sent by the UI) to the typed enum.
+fn parse_platform(s: &str) -> Option<types::Platform> {
+    ALL_PLATFORMS
+        .iter()
+        .find(|p| format!("{:?}", p) == s)
+        .cloned()
+}
 
 struct AppState {
     graph: Mutex<graph::GraphEngine>,
     ml: ml::MLPipeline,
-    search: Mutex<search::SemanticSearch>,
-    bridge: Mutex<bridge::UnifiedBridge>,
     store: store::SecureStore,
+    news_cache: Mutex<Option<(u64, Vec<types::Post>)>>,
+    feed_sync: Mutex<HashMap<types::Platform, u64>>,
+    inbox_sync: Mutex<HashMap<types::Platform, u64>>,
+}
+
+/// How long a news fetch is served from cache before hitting the network again.
+const NEWS_TTL_SECS: u64 = 5 * 60;
+
+/// Minimum gap between two background re-syncs of the same platform/source.
+/// Startup syncs (non-forced) skip sources refreshed within this window so a
+/// relaunch doesn't grind through every network call again.
+const SYNC_COOLDOWN_SECS: u64 = 5 * 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn was_refreshed(map: &Mutex<HashMap<types::Platform, u64>>, p: &types::Platform, now: u64) -> bool {
+    if let Ok(guard) = map.lock() {
+        if let Some(ts) = guard.get(p) {
+            if now.saturating_sub(*ts) < SYNC_COOLDOWN_SECS {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn touch_sync(map: &Mutex<HashMap<types::Platform, u64>>, p: &types::Platform, now: u64) {
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(p.clone(), now);
+    }
 }
 
 #[tauri::command]
-fn get_feed(state: State<AppState>, user_id: Option<String>, platform: Option<String>) -> Result<Vec<types::FeedItem>, String> {
+async fn get_news(state: State<'_, AppState>) -> Result<Vec<types::Post>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+
+    if let Ok(guard) = state.news_cache.lock() {
+        if let Some((ts, posts)) = guard.as_ref() {
+            if now.saturating_sub(*ts) < NEWS_TTL_SECS {
+                return Ok(posts.clone());
+            }
+        }
+    }
+
+    let cred = state.store.get_credential(&types::Platform::Twitter)
+        .map_err(|e| e.to_string())?.ok_or_else(|| "Twitter not connected.".to_string())?;
+    let posts = ingestion::twitter::TwitterIngester.fetch_news(&cred, &["Polymarket", "AJEnglish"]).await?;
+
+    if let Ok(mut guard) = state.news_cache.lock() {
+        *guard = Some((now, posts.clone()));
+    }
+    Ok(posts)
+}
+
+#[tauri::command]
+async fn get_feed(state: State<'_, AppState>, user_id: Option<String>, platform: Option<String>) -> Result<Vec<types::FeedItem>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let ml = &state.ml;
     let platform = platform.as_deref().unwrap_or("All");
@@ -43,53 +119,76 @@ fn get_feed(state: State<AppState>, user_id: Option<String>, platform: Option<St
         }
     };
 
-    let posts = match platform {
-        "Instagram" => graph.get_feed(&types::Platform::Instagram, 20).map(|v| v.into_iter().map(wrap).collect()),
-        "Twitter" => graph.get_feed(&types::Platform::Twitter, 20).map(|v| v.into_iter().map(wrap).collect()),
-        "LinkedIn" => graph.get_feed(&types::Platform::LinkedIn, 20).map(|v| v.into_iter().map(wrap).collect()),
-        _ => {
+    let feed = parse_platform(&platform).map(|p| graph.get_feed(&p, 20));
+    match feed {
+        Some(result) => result.map(|v| v.into_iter().map(wrap).collect()),
+        None => {
             let mut all: Vec<types::FeedItem> = Vec::new();
-            for p in [types::Platform::Instagram, types::Platform::Twitter, types::Platform::LinkedIn] {
-                if let Ok(v) = graph.get_feed(&p, 20) {
+            for p in &ALL_PLATFORMS {
+                if let Ok(v) = graph.get_feed(p, 20) {
                     all.extend(v.into_iter().map(|p| wrap(p)));
                 }
             }
             all.sort_by(|a, b| b.post.timestamp.cmp(&a.post.timestamp));
             Ok(all)
         }
-    }?;
-    Ok(posts)
+    }
 }
 
 #[tauri::command]
-fn search_posts(state: State<AppState>, query: String, platform: Option<String>) -> Result<Vec<String>, String> {
-    let search = state.search.lock().map_err(|e| e.to_string())?;
-    let platform = platform.as_ref().map(|s| match s.as_str() {
-        "Instagram" => types::Platform::Instagram,
-        "Twitter" => types::Platform::Twitter,
-        "LinkedIn" => types::Platform::LinkedIn,
-        _ => types::Platform::Twitter,
+async fn search_library(state: State<'_, AppState>, query: String, platform: Option<String>) -> Result<Vec<types::Post>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let platform = platform.as_deref().and_then(|s| match s {
+        "Instagram" => Some(types::Platform::Instagram),
+        "Twitter" => Some(types::Platform::Twitter),
+        "LinkedIn" => Some(types::Platform::LinkedIn),
+        _ => None,
     });
-    Ok(search.search_text(&query, platform.as_ref(), 20))
+    graph.search_posts_text(&query, platform.as_ref(), 50).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn store_credential(state: State<AppState>, platform: String, session_token: String, user_id: String) -> Result<(), String> {
-    let p = match platform.as_str() {
+async fn search_platform(state: State<'_, AppState>, platform: String, query: String) -> Result<Vec<types::Post>, String> {
+    let platform = match platform.as_str() {
         "Instagram" => types::Platform::Instagram,
         "Twitter" => types::Platform::Twitter,
         "LinkedIn" => types::Platform::LinkedIn,
         _ => return Err("unknown platform".into()),
     };
+
+    let cred = state.store.get_credential(&platform)?
+        .ok_or_else(|| format!("{:?} not connected", platform))?;
+
+    match platform {
+        types::Platform::Instagram => {
+            let mut ing = ingestion::instagram::InstagramIngester;
+            ing.search_posts(&cred, &query).await
+        }
+        types::Platform::Twitter => {
+            let ing = ingestion::twitter::TwitterIngester;
+            ing.search_posts(&cred, &query).await
+        }
+        // LinkedIn's public search API is unstable for live scraping; search
+        // the local indexed library instead so the platform is still searchable.
+        types::Platform::LinkedIn => {
+            let graph = state.graph.lock().map_err(|e| e.to_string())?;
+            graph.search_posts_text(&query, Some(&types::Platform::LinkedIn), 30).map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn store_credential(state: State<AppState>, platform: String, session_token: String, user_id: String) -> Result<(), String> {
+    let p = parse_platform(&platform).ok_or_else(|| format!("unknown platform: {}", platform))?;
     let cred = types::Credential { platform: p, session_token, user_id };
     state.store.store_credential(&cred)
 }
 
 #[tauri::command]
-fn get_credentials(state: State<AppState>) -> Result<Vec<types::Credential>, String> {
+async fn get_credentials(state: State<'_, AppState>) -> Result<Vec<types::Credential>, String> {
     let store = &state.store;
     let mut creds = Vec::new();
-    for p in &[types::Platform::Instagram, types::Platform::Twitter, types::Platform::LinkedIn] {
+    for p in &ALL_PLATFORMS {
         if let Ok(Some(cred)) = store.get_credential(p) {
             creds.push(cred);
         }
@@ -99,13 +198,29 @@ fn get_credentials(state: State<AppState>) -> Result<Vec<types::Credential>, Str
 
 #[tauri::command]
 fn remove_credential(state: State<AppState>, platform: String) -> Result<(), String> {
-    let p = match platform.as_str() {
-        "Instagram" => types::Platform::Instagram,
-        "Twitter" => types::Platform::Twitter,
-        "LinkedIn" => types::Platform::LinkedIn,
-        _ => return Err("unknown platform".into()),
-    };
+    let p = parse_platform(&platform).ok_or_else(|| format!("unknown platform: {}", platform))?;
     state.store.remove_credential(&p)
+}
+
+/// Connect LinkedIn by opening the device-trusted headed profile once.
+///
+/// LinkedIn device-binds its session cookie, so a browser that has never been
+/// used to sign in is rejected (429/redirect-loop). The sidecar opens a headed
+/// window in a dedicated profile; after the user signs in it returns the fresh
+/// session, which we persist as the LinkedIn credential.
+#[tauri::command]
+async fn linkedin_connect(state: State<'_, AppState>) -> Result<(), String> {
+    let body = crate::http::xproxy::XProxy::op("", "linkedin_login", "").await?;
+    let session_token = body["session_token"]
+        .as_str()
+        .ok_or_else(|| "linkedin login returned no session".to_string())?
+        .to_string();
+    let cred = types::Credential {
+        platform: types::Platform::LinkedIn,
+        session_token,
+        user_id: "".into(),
+    };
+    state.store.store_credential(&cred)
 }
 
 #[tauri::command]
@@ -132,16 +247,11 @@ fn analyze_post(state: State<AppState>, content: String) -> Result<ml::PostFilte
 }
 
 #[tauri::command]
-fn get_conversations(state: State<AppState>, platform: Option<String>) -> Result<Vec<types::Conversation>, String> {
+async fn get_conversations(state: State<'_, AppState>, platform: Option<String>) -> Result<Vec<types::Conversation>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     match platform {
         Some(p) => {
-            let p = match p.as_str() {
-                "Instagram" => types::Platform::Instagram,
-                "Twitter" => types::Platform::Twitter,
-                "LinkedIn" => types::Platform::LinkedIn,
-                _ => return Err("unknown platform".into()),
-            };
+            let p = parse_platform(&p).ok_or_else(|| format!("unknown platform: {}", p))?;
             graph.get_conversations(&p)
         }
         None => graph.get_all_conversations(),
@@ -149,23 +259,10 @@ fn get_conversations(state: State<AppState>, platform: Option<String>) -> Result
 }
 
 #[tauri::command]
-fn get_messages(state: State<AppState>, conversation_id: String, platform: String) -> Result<Vec<types::Message>, String> {
+async fn get_messages(state: State<'_, AppState>, conversation_id: String, platform: String) -> Result<Vec<types::Message>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let p = match platform.as_str() {
-        "Instagram" => types::Platform::Instagram,
-        "Twitter" => types::Platform::Twitter,
-        "LinkedIn" => types::Platform::LinkedIn,
-        _ => return Err("unknown platform".into()),
-    };
+    let p = parse_platform(&platform).ok_or_else(|| format!("unknown platform: {}", platform))?;
     graph.get_messages(&conversation_id, &p)
-}
-
-#[tauri::command]
-async fn search_instagram(state: State<'_, AppState>, query: String) -> Result<Vec<types::Post>, String> {
-    let cred = state.store.get_credential(&types::Platform::Instagram)?
-        .ok_or_else(|| "Instagram not connected".to_string())?;
-    let mut ing = ingestion::instagram::InstagramIngester;
-    ing.search_posts(&cred, &query).await
 }
 
 #[tauri::command]
@@ -185,26 +282,28 @@ async fn get_comments(state: State<'_, AppState>, media_id: String) -> Result<Ve
 }
 
 #[tauri::command]
-async fn sync_messages(state: State<'_, AppState>, platform: String) -> Result<usize, String> {
-    let p = match platform.as_str() {
-        "Instagram" => types::Platform::Instagram,
-        "Twitter" => types::Platform::Twitter,
-        "LinkedIn" => types::Platform::LinkedIn,
-        "All" => {
+async fn sync_messages(state: State<'_, AppState>, platform: String, force: Option<bool>) -> Result<usize, String> {
+    let force = force.unwrap_or(false);
+    match parse_platform(&platform) {
+        Some(p) => sync_platform_inbox(&state, &p, force).await,
+        None if platform == "All" => {
             let mut total = 0usize;
-            for pp in &[types::Platform::Instagram, types::Platform::Twitter, types::Platform::LinkedIn] {
+            for pp in &ALL_PLATFORMS {
                 if let Ok(Some(_)) = state.store.get_credential(pp) {
-                    total += sync_platform_inbox(&state, pp).await?;
+                    total += sync_platform_inbox(&state, pp, force).await?;
                 }
             }
-            return Ok(total);
+            Ok(total)
         }
-        _ => return Err("unknown platform".into()),
-    };
-    sync_platform_inbox(&state, &p).await
+        None => Err(format!("unknown platform: {}", platform)),
+    }
 }
 
-async fn sync_platform_inbox(state: &State<'_, AppState>, platform: &types::Platform) -> Result<usize, String> {
+async fn sync_platform_inbox(state: &State<'_, AppState>, platform: &types::Platform, force: bool) -> Result<usize, String> {
+    if !force && was_refreshed(&state.inbox_sync, platform, now_secs()) {
+        return Ok(0);
+    }
+
     let cred = state.store.get_credential(platform)?
         .ok_or_else(|| format!("{:?} not connected", platform))?;
 
@@ -216,6 +315,7 @@ async fn sync_platform_inbox(state: &State<'_, AppState>, platform: &types::Plat
 
     let mut ing = ing;
     let threads = ing.fetch_inbox(&cred).await?;
+    touch_sync(&state.inbox_sync, platform, now_secs());
 
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let mut saved = 0usize;
@@ -230,13 +330,8 @@ async fn sync_platform_inbox(state: &State<'_, AppState>, platform: &types::Plat
 }
 
 #[tauri::command]
-fn mark_post_seen(state: State<AppState>, platform: String, post_id: String) -> Result<(), String> {
-    let p = match platform.as_str() {
-        "Instagram" => types::Platform::Instagram,
-        "Twitter" => types::Platform::Twitter,
-        "LinkedIn" => types::Platform::LinkedIn,
-        _ => return Err("unknown platform".into()),
-    };
+async fn mark_post_seen(state: State<'_, AppState>, platform: String, post_id: String) -> Result<(), String> {
+    let p = parse_platform(&platform).ok_or_else(|| format!("unknown platform: {}", platform))?;
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.mark_post_seen(&p, &post_id)
 }
@@ -273,11 +368,17 @@ async fn monitor_profile(state: State<'_, AppState>, platform: String, username:
 }
 
 #[tauri::command]
-async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, String> {
+async fn sync_all(state: State<'_, AppState>, force: Option<bool>) -> Result<types::SyncResult, String> {
+    let force = force.unwrap_or(false);
+    let now = now_secs();
+
     let creds = {
         let store = &state.store;
         let mut all = Vec::new();
-        for p in &[types::Platform::Instagram, types::Platform::Twitter, types::Platform::LinkedIn] {
+        for p in &ALL_PLATFORMS {
+            if was_refreshed(&state.feed_sync, p, now) && !force {
+                continue;
+            }
             if let Ok(Some(cred)) = store.get_credential(p) {
                 all.push(cred);
             }
@@ -286,7 +387,11 @@ async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, Strin
     };
 
     if creds.is_empty() {
-        return Err("No credentials configured. Connect a platform in Settings first.".into());
+        return Ok(types::SyncResult {
+            posts_added: 0,
+            messages_added: 0,
+            errors: Vec::new(),
+        });
     }
 
     let mut engine = ingestion::IngestionEngine::new();
@@ -296,6 +401,7 @@ async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, Strin
     let mut errors = Vec::new();
 
     for (platform, result) in &results {
+        touch_sync(&state.feed_sync, platform, now);
         match result {
             Ok(posts) => {
                 if let Ok(graph) = state.graph.lock() {
@@ -305,11 +411,6 @@ async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, Strin
                         } else {
                             posts_added += 1;
                         }
-                    }
-                }
-                if let Ok(mut search) = state.search.lock() {
-                    for post in posts {
-                        search.index_post(post);
                     }
                 }
             }
@@ -322,6 +423,7 @@ async fn sync_all(state: State<'_, AppState>) -> Result<types::SyncResult, Strin
     let inbox_results = engine.fetch_all_inboxes(&creds).await;
     let mut messages_added = 0usize;
     for (platform, result) in &inbox_results {
+        touch_sync(&state.inbox_sync, platform, now);
         match result {
             Ok(threads) => {
                 if let Ok(graph) = state.graph.lock() {
@@ -363,6 +465,16 @@ pub fn run() {
         graph::GraphEngine::new(":memory:").expect("failed to init graph")
     });
 
+    let media_store = store::SecureStore::new();
+    let media_cache = media_server::MediaCache::new();
+    {
+        let s = media_store.clone();
+        let c = media_cache.clone();
+        std::thread::spawn(move || {
+            media_server::serve("127.0.0.1:8231".parse().expect("media addr"), s, c);
+        });
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -401,45 +513,28 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .register_uri_scheme_protocol("media", |ctx, request: tauri::http::Request<Vec<u8>>| {
-            let state = ctx.app_handle().state::<AppState>();
-            let path = request.uri().path().trim_start_matches('/').to_string();
-            let remote = media::decode_url(&path);
-
-            let result = match remote {
-                Some(url) => media::proxy(&state.store, &url, request.headers()),
-                None => Err("invalid media url".into()),
-            };
-
-            match result {
-                Ok(resp) => resp,
-                Err(e) => {
-                    let mut resp = tauri::http::Response::builder().status(404);
-                    resp = resp.header("Content-Type", "text/plain");
-                    resp.body(e.into_bytes())
-                        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
-                }
-            }
-        })
         .manage(AppState {
             graph: Mutex::new(graph),
             ml: ml::MLPipeline::new(),
-            search: Mutex::new(search::SemanticSearch::new()),
-            bridge: Mutex::new(bridge::UnifiedBridge::new()),
             store: store::SecureStore::new(),
+            news_cache: Mutex::new(None),
+            feed_sync: Mutex::new(HashMap::new()),
+            inbox_sync: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_feed,
-            search_posts,
+            get_news,
+            search_library,
+            search_platform,
             store_credential,
             get_credentials,
             remove_credential,
+            linkedin_connect,
             analyze_post,
             get_conversations,
             get_messages,
             monitor_profile,
             sync_all,
-            search_instagram,
             get_stories,
             get_comments,
             sync_messages,

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 const SERVICE_NAME: &str = "no_pysop";
 
+#[derive(Clone)]
 pub struct SecureStore {
     dir: PathBuf,
 }
@@ -12,6 +13,13 @@ impl SecureStore {
         let dir = dirs_next::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(SERVICE_NAME);
+        std::fs::create_dir_all(&dir).ok();
+        Self { dir }
+    }
+
+    /// A store rooted at an explicit directory. Used by tests to avoid touching
+    /// the real on-disk credentials (the default data dir).
+    pub fn in_dir(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).ok();
         Self { dir }
     }
@@ -74,7 +82,9 @@ mod tests {
 
     #[test]
     fn test_store_roundtrip() {
-        let store = SecureStore::new();
+        let store = SecureStore::in_dir(
+            std::env::temp_dir().join(format!("no_pysop_test_roundtrip_{}", std::process::id())),
+        );
         let cred = Credential {
             platform: Platform::Twitter,
             session_token: "test_token_123".into(),
@@ -94,7 +104,9 @@ mod tests {
 
     #[test]
     fn test_missing_credential() {
-        let store = SecureStore::new();
+        let store = SecureStore::in_dir(
+            std::env::temp_dir().join(format!("no_pysop_test_missing_{}", std::process::id())),
+        );
         store.remove_credential(&Platform::LinkedIn).ok();
         let result = store.get_credential(&Platform::LinkedIn).unwrap();
         assert!(result.is_none());

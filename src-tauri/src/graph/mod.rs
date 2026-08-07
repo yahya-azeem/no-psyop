@@ -21,11 +21,13 @@ impl GraphEngine {
         db.upsert_user(&user).map_err(|e| e.to_string())
     }
 
+    #[allow(dead_code)] // graph analytics API reserved for future ranking features
     pub fn get_mutuals(&self, user_id: &UserId, platform: &Platform) -> Result<Vec<SocialUser>, String> {
         let db = self.db.lock().map_err(|e| e.to_string())?;
         db.get_mutual_connections(user_id, platform).map_err(|e| e.to_string())
     }
 
+    #[allow(dead_code)] // graph analytics API reserved for future ranking features
     pub fn is_mutual_engagement(&self, post: &Post) -> Result<bool, String> {
         let db = self.db.lock().map_err(|e| e.to_string())?;
         let mutuals: HashSet<UserId> = db
@@ -87,5 +89,11 @@ impl GraphEngine {
     pub fn mark_post_seen(&self, platform: &Platform, post_id: &str) -> Result<(), String> {
         let db = self.db.lock().map_err(|e| e.to_string())?;
         db.mark_post_seen(platform, post_id).map_err(|e| e.to_string())
+    }
+
+    /// Search indexed post content/across one or all platforms.
+    pub fn search_posts_text(&self, query: &str, platform: Option<&Platform>, limit: usize) -> Result<Vec<Post>, String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        db.search_posts_text(query, platform, limit).map_err(|e| e.to_string())
     }
 }

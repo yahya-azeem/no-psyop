@@ -24,16 +24,14 @@ async function syncCycle(): Promise<void> {
   startupSync.update((s) => ({ ...s, status: 'syncing', message: 'Syncing…' }));
   const errors: string[] = [];
   try {
-    const result = await invoke<SyncResult>('sync_all');
+    const result = await invoke<SyncResult>('sync_all', { force: false });
     if (result.errors.length > 0) errors.push(...result.errors);
   } catch (e) {
     errors.push(String(e));
   }
-  try {
-    await invoke<number>('sync_messages', { platform: 'All' });
-  } catch {
-    // message sync is non-fatal
-  }
+  // Message sync is intentionally NOT part of the startup/periodic cycle: it
+  // spins up the persistent browser, so it runs on-demand from the Inbox page
+  // (where it also avoids hammering the app during the first minutes).
 
   syncVersion += 1;
   if (errors.length > 0) {

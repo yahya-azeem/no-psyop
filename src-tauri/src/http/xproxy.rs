@@ -32,7 +32,9 @@ async fn health() -> bool {
 
 fn spawn_proxy() {
     let script = format!("{}/../sidecars/x_proxy.py", env!("CARGO_MANIFEST_DIR"));
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let mut candidates: Vec<String> = vec![
+        format!("{}/.local/share/no_pysop/.venv/bin/python", home),
         "/tmp/opencode/.xvenv/bin/python".into(),
         "python3".into(),
         "python".into(),
@@ -113,5 +115,68 @@ impl XProxy {
 
     pub async fn inbox(cookies: &str) -> Result<serde_json::Value, String> {
         Self::op(cookies, "inbox", "").await
+    }
+
+    pub async fn user_tweets(cookies: &str, username: &str) -> Result<serde_json::Value, String> {
+        Self::op(cookies, "user_tweets", username).await
+    }
+
+    pub async fn search(cookies: &str, query: &str) -> Result<serde_json::Value, String> {
+        Self::op(cookies, "search", query).await
+    }
+
+    /// Scrape the LinkedIn home feed through the browser sidecar (LinkedIn
+    /// blocks plain-HTTP clients). Returns `{"posts":[...]}`.
+    pub async fn linkedin_feed(cookies: &str) -> Result<serde_json::Value, String> {
+        ensure_running().await?;
+        let body = serde_json::json!({
+            "op": "linkedin_feed",
+            "username": "",
+            "cookies": cookies,
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .post(format!("{}/op", base_url()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("proxy http: {}", e))?;
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("proxy response: {}", e))?;
+        if v["ok"].as_bool().unwrap_or(false) {
+            Ok(v["body"].clone())
+        } else {
+            Err(v["error"].as_str().unwrap_or("proxy error").to_string())
+        }
+    }
+
+    /// Capture the LinkedIn messaging inbox through the trusted browser profile.
+    pub async fn linkedin_messages() -> Result<serde_json::Value, String> {
+        ensure_running().await?;
+        let body = serde_json::json!({ "op": "linkedin_messages", "username": "", "cookies": "" });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(90))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .post(format!("{}/op", base_url()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("proxy http: {}", e))?;
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("proxy response: {}", e))?;
+        if v["ok"].as_bool().unwrap_or(false) {
+            Ok(v["body"].clone())
+        } else {
+            Err(v["error"].as_str().unwrap_or("proxy error").to_string())
+        }
     }
 }

@@ -32,6 +32,7 @@ impl InstagramIngester {
         Ok(csrf)
     }
 
+    #[allow(dead_code)] // legacy parser; superseded by post_from_media
     fn parse_feed_items(&self, body: &serde_json::Value) -> Vec<Post> {
         let mut posts = Vec::new();
         let reels = body["data"]["reels_media"].as_array();
@@ -137,6 +138,7 @@ impl InstagramIngester {
         posts
     }
 
+    #[allow(dead_code)] // legacy parser; superseded by post_from_media
     fn parse_item(&self, item: &serde_json::Value) -> Option<Post> {
         let id = item["id"].as_str()?.to_string();
         let text = item["caption"]["text"].as_str().unwrap_or("").to_string();

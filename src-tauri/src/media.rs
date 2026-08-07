@@ -1,10 +1,7 @@
 use std::time::Duration;
 
 use base64::Engine;
-use reqwest::header::{
-    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, RANGE, REFERER, USER_AGENT,
-};
-use tauri::http::{header::HeaderMap, Response};
+use reqwest::header::{CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
 
 use crate::store::SecureStore;
 use crate::types::Platform;
@@ -25,12 +22,15 @@ pub fn decode_url(s: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-pub fn proxy(store: &SecureStore, remote_url: &str, req_headers: &HeaderMap) -> Result<Response<Vec<u8>>, String> {
+pub fn fetch_media(
+    store: &SecureStore,
+    remote_url: &str,
+) -> Result<(Vec<u8>, String), String> {
     let cred = store.get_credential(&Platform::Instagram).ok().flatten();
     let cookies = cred.map(|c| c.session_token).unwrap_or_default();
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("client: {}", e))?;
 
@@ -41,26 +41,16 @@ pub fn proxy(store: &SecureStore, remote_url: &str, req_headers: &HeaderMap) -> 
     if !cookies.is_empty() {
         req = req.header(COOKIE, cookies);
     }
-    if let Some(range) = req_headers.get(RANGE) {
-        if let Ok(range) = range.to_str() {
-            req = req.header(RANGE, range);
-        }
-    }
 
     let resp = req.send().map_err(|e| format!("origin: {}", e))?;
-    let status = resp.status();
-    let headers = resp.headers().clone();
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let body = resp.bytes().map_err(|e| format!("body: {}", e))?.to_vec();
-
-    let mut builder = Response::builder().status(status);
-    for name in [CONTENT_TYPE, CONTENT_LENGTH, CONTENT_RANGE, ACCEPT_RANGES] {
-        if let Some(v) = headers.get(&name) {
-            if let Ok(v) = v.to_str() {
-                builder = builder.header(&name, v);
-            }
-        }
-    }
-    builder.body(body).map_err(|e| e.to_string())
+    Ok((body, content_type))
 }
 
 #[cfg(test)]

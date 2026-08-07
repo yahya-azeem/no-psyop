@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { playWhenReady } from '$lib/video';
 
   let { src, poster = '', loop = true, showControls = false, autoplay = false } = $props();
 
@@ -8,7 +9,7 @@
   function playMuted() {
     if (!videoEl) return;
     videoEl.muted = true;
-    videoEl.play().catch(() => {});
+    playWhenReady(videoEl);
   }
 
   function pause() {
@@ -20,7 +21,7 @@
     if (!videoEl) return;
     if (videoEl.paused) {
       videoEl.muted = false;
-      videoEl.play().catch(() => {});
+      playWhenReady(videoEl);
     } else {
       videoEl.pause();
     }
@@ -40,7 +41,7 @@
   playsinline
   muted
   controls={showControls}
-  preload="metadata"
+  preload="auto"
   onmouseenter={playMuted}
   onmouseleave={pause}
   onclick={togglePlay}

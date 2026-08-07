@@ -28,7 +28,7 @@
     syncingMsgs = true;
     syncMsg = '';
     try {
-      const saved = await invoke<number>('sync_messages', { platform: 'All' });
+      const saved = await invoke<number>('sync_messages', { platform: 'All', force: true });
       syncMsg = `Synced ${saved} new messages.`;
     } catch (e) {
       syncMsg = `Sync failed: ${e}`;

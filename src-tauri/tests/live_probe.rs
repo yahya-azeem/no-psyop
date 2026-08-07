@@ -341,42 +341,59 @@ async fn probe_media_proxy_range_behavior() {
     let store = SecureStore::new();
     assert!(store.has_credential(&Platform::Instagram), "no stored cred");
 
-    let empty_headers = tauri::http::HeaderMap::new();
-    let mut range_headers = tauri::http::HeaderMap::new();
-    range_headers.insert("range", "bytes=0-".parse().unwrap());
+    let fetch_url = url.clone();
+    let (bytes, ct) = tokio::task::spawn_blocking(move || {
+        media::fetch_media(&store, &fetch_url).map_err(|e| e.to_string())
+    })
+    .await
+    .expect("blocking task panicked")
+    .expect("fetch_media failed");
+    println!(
+        "MEDIA fetch_media: url_len={} content_type={:?} body_bytes={}",
+        url.len(),
+        ct,
+        bytes.len()
+    );
 
-    // proxy uses reqwest::blocking; run it off the tokio runtime
-    let handle = std::thread::spawn(move || {
-        let no_range = media::proxy(&store, &url, &empty_headers);
-        match &no_range {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let cl = resp.headers().get("content-length").cloned();
-                let ct = resp.headers().get("content-type").cloned();
-                let len = resp.body().len();
-                println!(
-                    "PROXY no-range: status={} content_type={:?} content_length={:?} body_bytes={}",
-                    status, ct, cl, len
-                );
-            }
-            Err(e) => println!("PROXY no-range ERROR: {}", e),
-        }
+    // Hard assertion: the media layer must hand back a real, playable-looking
+    // MP4 body (not HTML/login), with a video content-type.
+    assert!(ct.to_lowercase().contains("video"), "unexpected content-type: {}", ct);
+    assert!(bytes.len() > 100_000, "video body unexpectedly small: {}", bytes.len());
+    // A real MP4 starts with a box-size + ftyp; reject HTML/junk.
+    assert_eq!(bytes.get(4..8), Some(b"ftyp".as_slice()), "body does not look like MP4");
+    println!("PROXY OK: served {} bytes of video ({}), head={:?}", bytes.len(), ct, &bytes[8..12]);
+}
 
-        let open_range = media::proxy(&store, &url, &range_headers);
-        match &open_range {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let cl = resp.headers().get("content-length").cloned();
-                let cr = resp.headers().get("content-range").cloned();
-                let ct = resp.headers().get("content-type").cloned();
-                let len = resp.body().len();
-                println!(
-                    "PROXY range=bytes=0-: status={} content_type={:?} content_range={:?} content_length={:?} body_bytes={}",
-                    status, ct, cr, cl, len
-                );
-            }
-            Err(e) => println!("PROXY range=bytes=0- ERROR: {}", e),
-        }
-    });
-    handle.join().expect("proxy thread panicked");
+fn load_linkedin_credential() -> Credential {
+    use base64::Engine;
+    let path = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("no_pysop")
+        .join("cred_LinkedIn.json");
+    let encoded = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .expect("base64 decode credential");
+    serde_json::from_slice(&decoded).expect("parse credential")
+}
+
+#[tokio::test]
+#[ignore = "requires stored LinkedIn credential"]
+async fn probe_linkedin_feed() {
+    use no_pysop_lib::ingestion::linkedin::LinkedInIngester;
+    let cred = load_linkedin_credential();
+    let mut ing = LinkedInIngester;
+    let posts = ing.fetch_feed(&cred).await.expect("linkedin fetch_feed failed");
+    println!("LINKEDIN FEED posts: {}", posts.len());
+    for p in posts.iter().take(8) {
+        println!(
+            "  id={} user={} video={} media=[{}]",
+            p.id,
+            p.author_username,
+            p.is_video,
+            p.media_urls.iter().map(|u| summarize_url(u)).collect::<Vec<_>>().join(", ")
+        );
+    }
+    assert!(!posts.is_empty(), "expected >=1 linkedin post");
 }
