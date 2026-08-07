@@ -632,9 +632,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-            use tauri::menu::{MenuBuilder, MenuItemBuilder};
-            use tauri::Manager;
+            #[cfg(not(any(target_os = "ios", target_os = "android")))]
+            {
+                use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+                use tauri::menu::{MenuBuilder, MenuItemBuilder};
+                use tauri::Manager;
 
             let show = MenuItemBuilder::with_id("show", "Open no pysop").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -665,6 +667,7 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+            }
             Ok(())
         })
         .manage(AppState {
