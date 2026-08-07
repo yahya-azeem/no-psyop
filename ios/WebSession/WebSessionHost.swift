@@ -47,7 +47,7 @@ public protocol WebSessionDelegate: AnyObject {
     func session(_ host: WebSessionHost, didFail platform: WebSessionPlatform, error: String)
 }
 
-public final class WebSessionHost: NSObject {
+public final class WebSessionHost: NSObject, WKScriptMessageHandler {
     public weak var delegate: WebSessionDelegate?
 
     private let webView: WKWebView
@@ -123,8 +123,9 @@ public final class WebSessionHost: NSObject {
         pendingPlatform = platform
         let js = "window.__onemedia && window.__onemedia.scrape('\(platform.rawValue)', '\(kind)')"
         webView.evaluateJavaScript(js) { [weak self] _, error in
+            guard let self = self else { return }
             if let error = error {
-                self?.delegate?.session(self, didFail: platform, error: error.localizedDescription)
+                self.delegate?.session(self, didFail: platform, error: error.localizedDescription)
             }
         }
     }
@@ -145,12 +146,12 @@ public final class WebSessionHost: NSObject {
         webView.configuration.websiteDataStore.removeData(
             ofTypes: [WKWebsiteDataTypeCookies, WKWebsiteDataTypeLocalStorage],
             modifiedSince: .distantPast
-        )
+        ) { _ in }
     }
 
     // MARK: - WKScriptMessageHandler
 
-    public func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+    @objc public func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "onemedia",
               let raw = message.body as? String,
               let data = raw.data(using: .utf8),
@@ -169,7 +170,7 @@ public final class WebSessionHost: NSObject {
 }
 
 extension WebSessionHost: WKNavigationDelegate {
-    public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    @objc public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         delegate?.session(self, didFail: .twitter, error: error.localizedDescription)
     }
 }
