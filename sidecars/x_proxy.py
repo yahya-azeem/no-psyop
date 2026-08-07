@@ -505,6 +505,89 @@ class BrowserWorker(threading.Thread):
             if cookie_str:
                 self.ctx.add_cookies(_cookie_list(cookie_str))
             return self._inbox(page)
+        if op == "x_send":
+            page = self._ensure_persistent()
+            if cookie_str:
+                self.ctx.add_cookies(_cookie_list(cookie_str))
+            thread_id = payload.get("conversation_id", "")
+            text = payload.get("text", "")
+            if not thread_id or not text:
+                raise ValueError("x_send requires conversation_id and text")
+            try:
+                page.goto(f"https://x.com/messages/{thread_id}", wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+            box = None
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                try:
+                    box = page.query_selector(
+                        'div[data-testid="dmComposerTextInput"], '
+                        'textarea[data-testid="dmComposerTextInput"], '
+                        'div[data-testid="dmComposerInput"]'
+                    )
+                    if box:
+                        break
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+            if not box:
+                return {"error": "x dm composer not found"}
+            box.click()
+            page.keyboard.type(text, delay=15)
+            box.press("Enter")
+            page.wait_for_timeout(1500)
+            return {"op": "x_send", "body": {"sent": text[:60]}}
+        if op == "linkedin_send":
+            page = self._ensure_linkedin_browser(headed=False)
+            thread_id = payload.get("conversation_id", "")
+            text = payload.get("text", "")
+            if not text:
+                return {"error": "linkedin_send requires text"}
+            try:
+                page.goto(
+                    f"https://www.linkedin.com/messaging/thread/{thread_id}/",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+            except Exception:
+                pass
+            box = None
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                try:
+                    box = page.query_selector(
+                        '.msg-form__contenteditable, '
+                        'div.msg-form__msg-content-container--scrollable [contenteditable="true"], '
+                        'div[contenteditable="true"][role="textbox"]'
+                    )
+                    if box:
+                        break
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+            if not box:
+                return {"error": "linkedin message composer not found"}
+            box.click()
+            page.keyboard.type(text, delay=12)
+            sent = False
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                try:
+                    btn = page.query_selector(
+                        '.msg-form__send-button, button[aria-label="Send"]'
+                    )
+                    if btn and not btn.get_attribute("disabled"):
+                        btn.click()
+                        sent = True
+                        break
+                except Exception:
+                    pass
+                page.wait_for_timeout(300)
+            if not sent:
+                box.press("Enter")
+            page.wait_for_timeout(1200)
+            return {"op": "linkedin_send", "body": {"sent": text[:60]}}
         raise ValueError(f"unknown op {op}")
 
     def _capture(self, page, url, names, wait, scroll=False):
@@ -863,7 +946,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         op = payload.get("op")
-        if op not in ("feed", "profile", "user_tweets", "search", "linkedin_feed", "linkedin_login", "linkedin_messages", "linkedin_debug", "inbox"):
+        if op not in ("feed", "profile", "user_tweets", "search", "linkedin_feed", "linkedin_login", "linkedin_messages", "linkedin_debug", "inbox", "x_send", "linkedin_send"):
             self._send({"error": "unknown op"}, 400)
             return
 

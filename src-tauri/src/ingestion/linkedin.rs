@@ -525,6 +525,13 @@ impl PlatformIngester for LinkedInIngester {
         Ok(self.parse_browser_messages(&browser))
     }
 
+    async fn send_message(&mut self, credential: &Credential, conversation_id: &str, content: &str) -> Result<(), String> {
+        // Sending goes through the device-trusted browser profile (LinkedIn
+        // rejects Voyager messaging writes from generic HTTP clients).
+        let _ = credential;
+        XProxy::linkedin_send(conversation_id, content).await
+    }
+
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
         let client = self.build_client(credential);
         let csrf = self.csrf_token(credential);

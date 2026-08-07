@@ -318,8 +318,99 @@ fn route(state: &Arc<HostState>, path: &str, q: &HashMap<String, String>) -> Dyn
                 Err(e) => err_json(500, &e),
             }
         }
+        "/send" => {
+            let platform = q.get("platform").cloned().unwrap_or_default();
+            let conversation_id = q.get("conversation_id").cloned().unwrap_or_default();
+            let text = q.get("text").cloned().unwrap_or_default();
+            match send_inner(state, &platform, &conversation_id, &text) {
+                Ok(()) => json_body("{\"ok\":true}", 200),
+                Err(e) => err_json(500, &e),
+            }
+        }
+        "/rss" => match rss_posts_inner(state) {
+            Ok(v) => ok_json(&v),
+            Err(e) => err_json(500, &e),
+        },
+        "/rss-sync" => match rss_sync_inner(state) {
+            Ok(n) => ok_json(&n),
+            Err(e) => err_json(500, &e),
+        },
+        "/rss-sources" => {
+            let bodies = {
+                let sources = crate::rss_sources_vec();
+                if sources.is_empty() {
+                    crate::default_rss_sources()
+                } else {
+                    sources
+                }
+            };
+            ok_json(&bodies)
+        }
         _ => err_json(404, "not found"),
     }
+}
+
+fn send_inner(state: &Arc<HostState>, platform: &str, conversation_id: &str, text: &str) -> Result<(), String> {
+    let p = match platform {
+        "Instagram" => types::Platform::Instagram,
+        "Twitter" => types::Platform::Twitter,
+        "LinkedIn" => types::Platform::LinkedIn,
+        _ => return Err(format!("unknown platform: {platform}")),
+    };
+    let content = text.trim();
+    if content.is_empty() {
+        return Err("message is empty".to_string());
+    }
+    let cred = state.store.get_credential(&p)?.ok_or_else(|| format!("{:?} not connected", p))?;
+    let mut ing: Box<dyn crate::ingestion::PlatformIngester + Send + Sync> = match p {
+        types::Platform::Instagram => Box::new(crate::ingestion::instagram::InstagramIngester),
+        types::Platform::Twitter => Box::new(crate::ingestion::twitter::TwitterIngester),
+        types::Platform::LinkedIn => Box::new(crate::ingestion::linkedin::LinkedInIngester),
+        types::Platform::Rss => return Err("RSS has no messaging".into()),
+    };
+    state.rt.block_on(async move { ing.send_message(&cred, conversation_id, content).await })?;
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.save_message(&types::Message {
+        id: format!("local-{}-{}", p, now_secs()),
+        platform: p.clone(),
+        conversation_id: conversation_id.to_string(),
+        sender_id: "You".into(),
+        content: content.to_string(),
+        timestamp: now_secs(),
+        is_mine: true,
+    })?;
+    Ok(())
+}
+
+fn rss_posts_inner(state: &Arc<HostState>) -> Result<Vec<types::Post>, String> {
+    state
+        .graph
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get_feed(&types::Platform::Rss, 30)
+}
+
+fn rss_sync_inner(state: &Arc<HostState>) -> Result<usize, String> {
+    let feeds = {
+        let sources = crate::rss_sources_vec();
+        if sources.is_empty() {
+            crate::default_rss_sources()
+        } else {
+            sources
+        }
+    };
+    if feeds.is_empty() {
+        return Ok(0);
+    }
+    let posts = state.rt.block_on(crate::ingestion::rss::fetch_all(&feeds));
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let mut added = 0usize;
+    for p in &posts {
+        if graph.save_post(p).is_ok() {
+            added += 1;
+        }
+    }
+    Ok(added)
 }
 
 fn feed_inner(state: &Arc<HostState>, platform: &str, uid: &str) -> Result<Vec<types::FeedItem>, String> {
@@ -664,6 +755,41 @@ mod tests {
         let st = test_state();
         let b = body(route(&st, "/stories", &HashMap::new()));
         assert!(b.contains("error"), "body={b}");
+    }
+
+    #[test]
+    fn rss_returns_empty_without_posts() {
+        let st = test_state();
+        assert_eq!(body(route(&st, "/rss", &HashMap::new())), "[]");
+    }
+
+    #[test]
+    fn rss_sources_returns_defaults() {
+        let st = test_state();
+        let b = body(route(&st, "/rss-sources", &HashMap::new()));
+        assert!(b.contains("rss") || b.contains("xml"), "body={b}");
+    }
+
+    #[test]
+    fn send_without_credential_errors() {
+        let st = test_state();
+        let q = HashMap::from([
+            ("platform".to_string(), "Twitter".to_string()),
+            ("conversation_id".to_string(), "c1".to_string()),
+            ("text".to_string(), "hello".to_string()),
+        ]);
+        assert!(body(route(&st, "/send", &q)).contains("not connected"));
+    }
+
+    #[test]
+    fn send_with_empty_text_errors() {
+        let st = test_state();
+        let q = HashMap::from([
+            ("platform".to_string(), "Twitter".to_string()),
+            ("conversation_id".to_string(), "c1".to_string()),
+            ("text".to_string(), "  ".to_string()),
+        ]);
+        assert!(body(route(&st, "/send", &q)).contains("empty"));
     }
 
     #[test]

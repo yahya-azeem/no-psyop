@@ -74,17 +74,17 @@ fn was_refreshed(map: &Mutex<HashMap<types::Platform, u64>>, p: &types::Platform
     false
 }
 
-fn data_dir_path() -> std::path::PathBuf {
+pub(crate) fn data_dir_path() -> std::path::PathBuf {
     dirs_next::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("no_pysop")
 }
 
-fn news_cache_file() -> std::path::PathBuf {
+pub(crate) fn news_cache_file() -> std::path::PathBuf {
     data_dir_path().join("news_cache.json")
 }
 
-fn load_news_disk() -> Option<(u64, Vec<types::Post>)> {
+pub(crate) fn load_news_disk() -> Option<(u64, Vec<types::Post>)> {
     let bytes = std::fs::read(news_cache_file()).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let ts = v["ts"].as_u64()?;
@@ -92,25 +92,25 @@ fn load_news_disk() -> Option<(u64, Vec<types::Post>)> {
     Some((ts, posts))
 }
 
-fn save_news_disk(ts: u64, posts: &[types::Post]) {
+pub(crate) fn save_news_disk(ts: u64, posts: &[types::Post]) {
     let obj = serde_json::json!({ "ts": ts, "posts": posts });
     if let Ok(s) = serde_json::to_string(&obj) {
         let _ = std::fs::write(news_cache_file(), s);
     }
 }
 
-fn rss_sources_file() -> std::path::PathBuf {
+pub(crate) fn rss_sources_file() -> std::path::PathBuf {
     data_dir_path().join("rss_sources.json")
 }
 
-fn rss_sources_vec() -> Vec<String> {
+pub(crate) fn rss_sources_vec() -> Vec<String> {
     std::fs::read_to_string(rss_sources_file())
         .ok()
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default()
 }
 
-fn default_rss_sources() -> Vec<String> {
+pub(crate) fn default_rss_sources() -> Vec<String> {
     vec![
         "https://hnrss.org/frontpage".to_string(),
         "https://www.aljazeera.com/xml/rss/all.xml".to_string(),

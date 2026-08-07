@@ -408,6 +408,10 @@ impl PlatformIngester for TwitterIngester {
         Ok(self.extract_messages(&body))
     }
 
+    async fn send_message(&mut self, credential: &Credential, conversation_id: &str, content: &str) -> Result<(), String> {
+        XProxy::send_dm(&credential.session_token, conversation_id, content).await
+    }
+
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String> {
         Ok(credential.clone())
     }

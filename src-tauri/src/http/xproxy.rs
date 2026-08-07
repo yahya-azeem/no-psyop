@@ -125,6 +125,47 @@ impl XProxy {
         Self::op(cookies, "search", query).await
     }
 
+    /// Send a DM through the persistent X browser profile (which holds the
+    /// encrypted-DM passcode) by driving the conversation composer.
+    pub async fn send_dm(cookies: &str, conversation_id: &str, text: &str) -> Result<(), String> {
+        Self::proxy_op("x_send", cookies, conversation_id, text).await.map(|_| ())
+    }
+
+    /// Send a LinkedIn message through the device-trusted profile browser.
+    pub async fn linkedin_send(conversation_id: &str, text: &str) -> Result<(), String> {
+        Self::proxy_op("linkedin_send", "", conversation_id, text).await.map(|_| ())
+    }
+
+    async fn proxy_op(op_name: &str, cookies: &str, conversation_id: &str, text: &str) -> Result<serde_json::Value, String> {
+        ensure_running().await?;
+        let body = serde_json::json!({
+            "op": op_name,
+            "username": "",
+            "cookies": cookies,
+            "conversation_id": conversation_id,
+            "text": text,
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(150))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .post(format!("{}/op", base_url()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("proxy http: {}", e))?;
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("proxy response: {}", e))?;
+        if v["ok"].as_bool().unwrap_or(false) {
+            Ok(v["body"].clone())
+        } else {
+            Err(v["error"].as_str().unwrap_or("proxy error").to_string())
+        }
+    }
+
     /// Scrape the LinkedIn home feed through the browser sidecar (LinkedIn
     /// blocks plain-HTTP clients). Returns `{"posts":[...]}`.
     pub async fn linkedin_feed(cookies: &str) -> Result<serde_json::Value, String> {
