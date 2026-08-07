@@ -3,7 +3,7 @@
   import { proxiedMedia } from '$lib/media';
   import { playWhenReady } from '$lib/video';
   import { invoke } from '@tauri-apps/api/core';
-  import type { Comment, FeedItem } from '$lib/types';
+  import type { Comment, FeedItem, Post } from '$lib/types';
 
   let { items, sectioned = false }: { items: FeedItem[]; sectioned?: boolean } = $props();
   let openIdx = $state(-1);
@@ -12,12 +12,31 @@
   let commentsLoading = $state(false);
   let commentsError = $state('');
   let dismissed = $state(new Set<string>());
+  let rssItems = $state<FeedItem[]>([]);
+  let rssLoaded = $state(false);
 
-  let current = $derived(openIdx >= 0 && openIdx < items.length ? items[openIdx] : null);
+  let catalog: FeedItem[] = $derived(sectioned ? [...items, ...rssItems] : items);
+  let current = $derived(openIdx >= 0 && openIdx < catalog.length ? catalog[openIdx] : null);
   let visibleAll: FeedItem[] = $derived(items.filter((i) => !dismissed.has(i.post.id)));
   let gridItems: FeedItem[] = $derived(visibleAll.filter((i) => i.post.media_urls.length > 0));
 
   const VIRAL_THRESHOLD = 1000;
+
+  async function loadRss() {
+    if (rssLoaded) return;
+    rssLoaded = true;
+    try {
+      await invoke<number>('rss_sync').catch(() => 0);
+      const posts = await invoke<Post[]>('get_rss_posts');
+      rssItems = posts.map((p) => ({ post: p, proximity_score: 0, relevance_score: 0 }));
+    } catch {
+      rssItems = [];
+    }
+  }
+
+  $effect(() => {
+    if (sectioned) loadRss();
+  });
 
   function isFamily(item: FeedItem) {
     return item.post.author_is_mutual === true || item.post.author_is_close_friend === true;
@@ -58,11 +77,13 @@
   );
   let sections = $derived.by(() => {
     if (!sectioned) return [];
+    const rssSec = rssItems.map((item) => ({ item }));
     return [
       { title: 'Feed', sub: 'posts from your networks', entries: feedSec },
       { title: 'Friends & Family', sub: 'mutuals and close friends', entries: famSec },
       { title: 'Viral for you', sub: 'high engagement', entries: viralSec },
       { title: 'Corporate', sub: 'from LinkedIn', entries: corporateSec },
+      { title: 'RSS', sub: 'syndicated feeds', entries: rssSec },
     ].filter((s) => s.entries.length > 0);
   });
 
@@ -126,20 +147,20 @@
   function open(i: number) {
     const it = gridItems[i];
     if (!it) return;
-    openIdx = items.indexOf(it);
+    openIdx = catalog.indexOf(it);
     dismissed.add(it.post.id);
     invoke('mark_post_seen', { platform: it.post.platform, postId: it.post.id }).catch(() => {});
   }
 
   function openItem(it: FeedItem) {
     if (!it) return;
-    openIdx = items.indexOf(it);
+    openIdx = catalog.indexOf(it);
     dismissed.add(it.post.id);
     invoke('mark_post_seen', { platform: it.post.platform, postId: it.post.id }).catch(() => {});
   }
 
   function next() {
-    if (openIdx < items.length - 1) openIdx += 1;
+    if (openIdx < catalog.length - 1) openIdx += 1;
   }
 
   function prev() {
@@ -152,6 +173,10 @@
 
   function mediaCount(p: { media_urls: string[] }) {
     return p.media_urls.length;
+  }
+
+  function startsWithAt(u: string) {
+    return u.startsWith('@') ? u : `@${u}`;
   }
 
   function nextSlide() {
@@ -168,6 +193,38 @@
     slideIdx = (slideIdx - 1 + n) % n;
   }
 </script>
+
+{#snippet cellBadge(item: FeedItem)}
+  <span class="cell-meta">
+    <span
+      class="cell-logo"
+      class:ig={(item.post.platform ?? '').toLowerCase().startsWith('insta')}
+      class:tw={(item.post.platform ?? '').toLowerCase() === 'twitter' || (item.post.platform ?? '').toLowerCase().startsWith('x')}
+      class:li={(item.post.platform ?? '').toLowerCase().startsWith('linked')}
+    >
+      {#if (item.post.platform ?? '').toLowerCase().indexOf('insta') === 0}
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="5" stroke="currentColor" stroke-width="2"/>
+          <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/>
+          <circle cx="17.2" cy="6.8" r="1.3" fill="currentColor"/>
+        </svg>
+      {:else if (item.post.platform ?? '').toLowerCase() === 'twitter' || (item.post.platform ?? '').toLowerCase().startsWith('x')}
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+          <path d="M18.9 1.15h3.68l-8.04 9.19L24 22.85h-7.41l-5.8-7.58-6.64 7.58H.47l8.6-9.83L0 1.15h7.59l5.24 6.93L18.9 1.15Zm-1.29 19.5h2.04L6.49 3.24H4.3l13.31 17.41Z"/>
+        </svg>
+      {:else if (item.post.platform ?? '').toLowerCase().startsWith('linked')}
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+          <path d="M4.98 3.5A2.49 2.49 0 1 1 0 3.5a2.49 2.49 0 0 1 4.98 0ZM.24 8.31h4.52V24H.24V8.31ZM8.34 8.31h4.33v2.14h.06c.6-1.14 2.08-2.35 4.28-2.35 4.58 0 5.43 3.02 5.43 6.94V24h-4.52v-8.07c0-1.92-.04-4.4-2.68-4.4-2.68 0-3.09 2.09-3.09 4.26V24H8.34V8.31Z"/>
+        </svg>
+      {:else}
+        <span class="cell-gen">◎</span>
+      {/if}
+    </span>
+    {#if item.post.author_username}
+      <span class="cell-user">{startsWithAt(item.post.author_username)}</span>
+    {/if}
+  </span>
+{/snippet}
 
 <div class="media-grid">
   {#if sectioned}
@@ -216,6 +273,7 @@
               {#if isColor(item)}
                 <span class="cell-friend">●</span>
               {/if}
+              {@render cellBadge(item)}
             </button>
           {/each}
         </div>
@@ -260,6 +318,7 @@
         {#if isColor(item)}
           <span class="cell-friend">●</span>
         {/if}
+        {@render cellBadge(item)}
       </button>
     {/each}
   {/if}
@@ -360,8 +419,8 @@
           {:else}
             <ul class="comments-list">
               {#each comments as c (c.id)}
-                <li class="comment">
-                  <span class="comment-author">{commentLabel(c)}</span>
+                <li class="comment" class:own={c.is_mine}>
+                  <span class="comment-author">{c.is_mine ? `${commentLabel(c)} (you)` : commentLabel(c)}</span>
                   <span class="comment-time">{formatTimestamp(c.timestamp)}</span>
                   <p class="comment-body">{c.content}</p>
                   {#if c.likes > 0}
@@ -372,7 +431,7 @@
             </ul>
           {/if}
         </div>
-        <span class="lightbox-count">{openIdx + 1} / {items.length}</span>
+        <span class="lightbox-count">{openIdx + 1} / {catalog.length}</span>
       </div>
     </div>
   </div>
@@ -459,6 +518,7 @@
     position: absolute;
     inset: 0;
     padding: 0.5rem;
+    padding-bottom: 1.6rem;
     font-size: 0.8rem;
     text-align: left;
     overflow: hidden;
@@ -466,6 +526,56 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 6;
     line-clamp: 6;
+  }
+  .cell-meta {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.4rem;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+    pointer-events: none;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  }
+  .cell-logo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.05rem;
+    height: 1.05rem;
+    flex: 0 0 auto;
+    border-radius: 3px;
+  }
+  .cell-logo.ig {
+    color: #e1306c;
+    background: rgba(255, 255, 255, 0.92);
+  }
+  .cell-logo.tw {
+    color: #000;
+    background: #fff;
+  }
+  @media (prefers-color-scheme: light) {
+    .cell-logo.tw { color: #111; }
+  }
+  .cell-logo.li {
+    color: #0a66c2;
+    background: rgba(255, 255, 255, 0.92);
+  }
+  .cell-gen {
+    color: #fff;
+    font-size: 0.7rem;
+  }
+  .cell-user {
+    font-size: 0.66rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .cell-badge {
     position: absolute;
@@ -665,10 +775,8 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .comment {
-    font-size: 0.82rem;
-    line-height: 1.5;
-  }
+  .comment { font-size: 0.82rem; line-height: 1.5; }
+  .comment.own { color: var(--fg); }
   .comment-author {
     font-weight: 600;
     margin-right: 0.4rem;

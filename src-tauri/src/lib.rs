@@ -11,6 +11,7 @@ mod ml;
 mod bridge;
 pub mod media;
 mod media_server;
+pub mod host;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -49,6 +50,12 @@ const NEWS_TTL_SECS: u64 = 5 * 60;
 /// relaunch doesn't grind through every network call again.
 const SYNC_COOLDOWN_SECS: u64 = 5 * 60;
 
+fn touch_sync(map: &Mutex<HashMap<types::Platform, u64>>, p: &types::Platform, now: u64) {
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(p.clone(), now);
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -67,10 +74,47 @@ fn was_refreshed(map: &Mutex<HashMap<types::Platform, u64>>, p: &types::Platform
     false
 }
 
-fn touch_sync(map: &Mutex<HashMap<types::Platform, u64>>, p: &types::Platform, now: u64) {
-    if let Ok(mut guard) = map.lock() {
-        guard.insert(p.clone(), now);
+fn data_dir_path() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("no_pysop")
+}
+
+fn news_cache_file() -> std::path::PathBuf {
+    data_dir_path().join("news_cache.json")
+}
+
+fn load_news_disk() -> Option<(u64, Vec<types::Post>)> {
+    let bytes = std::fs::read(news_cache_file()).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let ts = v["ts"].as_u64()?;
+    let posts: Vec<types::Post> = serde_json::from_value(v["posts"].clone()).ok()?;
+    Some((ts, posts))
+}
+
+fn save_news_disk(ts: u64, posts: &[types::Post]) {
+    let obj = serde_json::json!({ "ts": ts, "posts": posts });
+    if let Ok(s) = serde_json::to_string(&obj) {
+        let _ = std::fs::write(news_cache_file(), s);
     }
+}
+
+fn rss_sources_file() -> std::path::PathBuf {
+    data_dir_path().join("rss_sources.json")
+}
+
+fn rss_sources_vec() -> Vec<String> {
+    std::fs::read_to_string(rss_sources_file())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn default_rss_sources() -> Vec<String> {
+    vec![
+        "https://hnrss.org/frontpage".to_string(),
+        "https://www.aljazeera.com/xml/rss/all.xml".to_string(),
+    ]
 }
 
 #[tauri::command]
@@ -80,11 +124,21 @@ async fn get_news(state: State<'_, AppState>) -> Result<Vec<types::Post>, String
         .map_err(|e| e.to_string())?
         .as_secs();
 
+    // Serve from the in-memory cache if fresh...
     if let Ok(guard) = state.news_cache.lock() {
         if let Some((ts, posts)) = guard.as_ref() {
             if now.saturating_sub(*ts) < NEWS_TTL_SECS {
                 return Ok(posts.clone());
             }
+        }
+    }
+    // ...otherwise fall back to the durable on-disk cache (survives restarts).
+    if let Some((ts, posts)) = load_news_disk() {
+        if now.saturating_sub(ts) < NEWS_TTL_SECS {
+            if let Ok(mut guard) = state.news_cache.lock() {
+                *guard = Some((ts, posts.clone()));
+            }
+            return Ok(posts);
         }
     }
 
@@ -95,6 +149,7 @@ async fn get_news(state: State<'_, AppState>) -> Result<Vec<types::Post>, String
     if let Ok(mut guard) = state.news_cache.lock() {
         *guard = Some((now, posts.clone()));
     }
+    save_news_disk(now, &posts);
     Ok(posts)
 }
 
@@ -173,6 +228,10 @@ async fn search_platform(state: State<'_, AppState>, platform: String, query: St
         types::Platform::LinkedIn => {
             let graph = state.graph.lock().map_err(|e| e.to_string())?;
             graph.search_posts_text(&query, Some(&types::Platform::LinkedIn), 30).map_err(|e| e.to_string())
+        }
+        types::Platform::Rss => {
+            let graph = state.graph.lock().map_err(|e| e.to_string())?;
+            graph.search_posts_text(&query, Some(&types::Platform::Rss), 30).map_err(|e| e.to_string())
         }
     }
 }
@@ -281,6 +340,99 @@ async fn get_comments(state: State<'_, AppState>, media_id: String) -> Result<Ve
     ing.fetch_comments(&cred, &media_id).await
 }
 
+/// Send a direct-message reply. The sent message is also persisted locally so
+/// it appears instantly in the thread.
+#[tauri::command]
+async fn send_message(state: State<'_, AppState>, platform: String, conversation_id: String, content: String) -> Result<(), String> {
+    let p = match platform.as_str() {
+        "Instagram" => types::Platform::Instagram,
+        "Twitter" => types::Platform::Twitter,
+        "LinkedIn" => types::Platform::LinkedIn,
+        _ => return Err(format!("unknown platform: {}", platform)),
+    };
+    let content = content.trim();
+    if content.is_empty() {
+        return Err("message is empty".to_string());
+    }
+    let cred = state.store.get_credential(&p)?.ok_or_else(|| format!("{:?} not connected", p))?;
+
+    let mut ing: Box<dyn ingestion::PlatformIngester + Send + Sync> = match p {
+        types::Platform::Instagram => Box::new(ingestion::instagram::InstagramIngester),
+        types::Platform::Twitter => Box::new(ingestion::twitter::TwitterIngester),
+        types::Platform::LinkedIn => Box::new(ingestion::linkedin::LinkedInIngester),
+        types::Platform::Rss => return Err("RSS has no messaging".into()),
+    };
+    ing.send_message(&cred, &conversation_id, content).await?;
+
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.save_message(&types::Message {
+        id: format!("local-{}-{}", p, now_secs()),
+        platform: p.clone(),
+        conversation_id: conversation_id.clone(),
+        sender_id: "You".into(),
+        content: content.to_string(),
+        timestamp: now_secs(),
+        is_mine: true,
+    })?;
+    Ok(())
+}
+
+/// Fetch configured RSS sources.
+#[tauri::command]
+async fn rss_get_sources() -> Result<Vec<String>, String> {
+    let sources = rss_sources_vec();
+    if sources.is_empty() {
+        Ok(default_rss_sources())
+    } else {
+        Ok(sources)
+    }
+}
+
+/// Persist the configured RSS sources.
+#[tauri::command]
+fn rss_set_sources(sources: Vec<String>) -> Result<(), String> {
+    let cleaned: Vec<String> = sources
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    std::fs::create_dir_all(data_dir_path()).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&cleaned).map_err(|e| e.to_string())?;
+    std::fs::write(rss_sources_file(), json).map_err(|e| e.to_string())
+}
+
+/// Pull every configured RSS feed and store the parsed posts in the graph.
+#[tauri::command]
+async fn rss_sync(state: State<'_, AppState>) -> Result<usize, String> {
+    let feeds = {
+        let sources = rss_sources_vec();
+        if sources.is_empty() {
+            default_rss_sources()
+        } else {
+            sources
+        }
+    };
+    if feeds.is_empty() {
+        return Ok(0);
+    }
+    let posts = ingestion::rss::fetch_all(&feeds).await;
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let mut added = 0usize;
+    for p in &posts {
+        if graph.save_post(p).is_ok() {
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+/// Read RSS-derived posts from the library (bottom grid section).
+#[tauri::command]
+async fn get_rss_posts(state: State<'_, AppState>) -> Result<Vec<types::Post>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.get_feed(&types::Platform::Rss, 30)
+}
+
 #[tauri::command]
 async fn sync_messages(state: State<'_, AppState>, platform: String, force: Option<bool>) -> Result<usize, String> {
     let force = force.unwrap_or(false);
@@ -311,6 +463,7 @@ async fn sync_platform_inbox(state: &State<'_, AppState>, platform: &types::Plat
         types::Platform::Instagram => Box::new(ingestion::instagram::InstagramIngester),
         types::Platform::Twitter => Box::new(ingestion::twitter::TwitterIngester),
         types::Platform::LinkedIn => Box::new(ingestion::linkedin::LinkedInIngester),
+        types::Platform::Rss => return Err("RSS has no inbox".to_string()),
     };
 
     let mut ing = ing;
@@ -360,6 +513,7 @@ async fn monitor_profile(state: State<'_, AppState>, platform: String, username:
             let mut ing = ingestion::linkedin::LinkedInIngester;
             ing.fetch_profile(&cred, &username).await?
         }
+        types::Platform::Rss => return Err("RSS has no profiles".into()),
     };
 
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
@@ -538,7 +692,12 @@ pub fn run() {
             get_stories,
             get_comments,
             sync_messages,
+            send_message,
             mark_post_seen,
+            rss_get_sources,
+            rss_set_sources,
+            rss_sync,
+            get_rss_posts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

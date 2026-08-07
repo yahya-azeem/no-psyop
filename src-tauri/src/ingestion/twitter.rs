@@ -299,6 +299,7 @@ impl TwitterIngester {
                         sender_id: sender,
                         content: text,
                         timestamp: ts,
+                        is_mine: false,
                     });
                 }
             }

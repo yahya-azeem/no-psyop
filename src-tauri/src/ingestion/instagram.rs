@@ -431,6 +431,7 @@ impl InstagramIngester {
         let mut comments = parse_comments(&body);
         for c in &mut comments {
             c.post_id = media_id.to_string();
+            c.is_mine = !credential.user_id.is_empty() && c.author_id == credential.user_id;
         }
         Ok(comments)
     }
@@ -607,6 +608,39 @@ impl PlatformIngester for InstagramIngester {
         Ok(parse_direct_body(&body))
     }
 
+    async fn send_message(&mut self, credential: &Credential, thread_id: &str, content: &str) -> Result<(), String> {
+        let token = ensure_sessionid_prefix(&credential.session_token);
+        let client = HttpClient::with_session(&token);
+        let csrf = self.extract_csrf(&client).await?;
+        let ctx = random_hex_id();
+        let offline = random_hex_id();
+        let url = format!("https://www.instagram.com/api/v1/direct_v2/threads/{}/items/", thread_id);
+        let resp = client
+            .client()
+            .post(&url)
+            .header("X-IG-App-ID", "936619743392459")
+            .header("X-CSRFToken", csrf.as_str())
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", &format!("https://www.instagram.com/direct/t/{}/", thread_id))
+            .form(&[
+                ("client_context", ctx.as_str()),
+                ("action", "send_item"),
+                ("item_type", "text"),
+                ("text", content.trim()),
+                ("mutation_token", ctx.as_str()),
+                ("offline_threading_id", offline.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("send dm http: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| format!("send body: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("Instagram rejected send (HTTP {}): {}", status.as_u16(), text.chars().take(160).collect::<String>()));
+        }
+        Ok(())
+    }
+
     async fn fetch_inbox(&mut self, credential: &Credential) -> Result<Vec<(crate::types::Conversation, Vec<Message>)>, String> {
         self.fetch_inbox(credential).await
     }
@@ -642,11 +676,22 @@ impl PlatformIngester for InstagramIngester {
 }
 
 pub fn ensure_sessionid_prefix(token: &str) -> String {
-    if token.trim().starts_with("sessionid=") || token.trim().starts_with("sessionid%3D") {
+    if token.starts_with("sessionid=") {
         token.to_string()
     } else {
         format!("sessionid={}", token)
     }
+}
+
+/// A random hex string used for IG direct-message client/mutation ids.
+fn random_hex_id() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut s = String::with_capacity(32);
+    for _ in 0..32 {
+        s.push_str(&format!("{:x}", rng.gen_range(0u32..16)));
+    }
+    s
 }
 
 fn urlencoding(s: &str) -> String {
@@ -866,6 +911,7 @@ pub fn parse_comments(body: &serde_json::Value) -> Vec<crate::types::Comment> {
                 content,
                 timestamp,
                 likes,
+                is_mine: false,
             });
         }
         return comments;
@@ -894,6 +940,7 @@ pub fn parse_comments(body: &serde_json::Value) -> Vec<crate::types::Comment> {
                 content,
                 timestamp,
                 likes,
+                is_mine: false,
             });
         }
     }
@@ -932,6 +979,7 @@ pub fn parse_direct_body(body: &serde_json::Value) -> Vec<Message> {
                         sender_id: sender,
                         content: text,
                         timestamp: ts,
+                        is_mine: false,
                     });
                 }
             }
@@ -1021,6 +1069,7 @@ pub fn parse_threads(body: &serde_json::Value, viewer_pk: &str) -> Vec<(crate::t
                         sender_id: sender,
                         content,
                         timestamp: ts,
+                        is_mine: pk == viewer_pk,
                     });
                 }
             }

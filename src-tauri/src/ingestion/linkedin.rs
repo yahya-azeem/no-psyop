@@ -433,6 +433,7 @@ impl LinkedInIngester {
                             sender_id: sender,
                             content: text,
                             timestamp: ts,
+                            is_mine: false,
                         });
                     }
                 }
@@ -598,8 +599,9 @@ impl LinkedInIngester {
                         platform: Platform::LinkedIn,
                         conversation_id: conv_id.clone(),
                         sender_id: sender,
-                        content,
+                        content: content,
                         timestamp: ts,
+                        is_mine: false,
                     }
                 })
                 .collect();

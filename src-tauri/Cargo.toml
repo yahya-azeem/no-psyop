@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Unified Social Media Aggregator — client-heavy, zero-server"
 authors = ["yahya"]
 edition = "2021"
+default-run = "no_pysop"
 
 [lib]
 name = "no_pysop_lib"
@@ -31,3 +32,9 @@ urlencoding = "2"
 keyring = "2"
 rand = "0.8"
 dirs-next = "2"
+tiny_http = "0.12"
+feed-rs = "2.4"
+
+[[bin]]
+name = "sync_host"
+path = "src/bin/sync_host.rs"

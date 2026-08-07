@@ -56,6 +56,7 @@ mod tests {
                 sender_id: "a".into(),
                 content: "old".into(),
                 timestamp: 100,
+                is_mine: false,
             },
             Message {
                 id: "2".into(),
@@ -64,6 +65,7 @@ mod tests {
                 sender_id: "b".into(),
                 content: "new".into(),
                 timestamp: 200,
+                is_mine: false,
             },
         ];
 
@@ -81,6 +83,7 @@ mod tests {
             sender_id: "u1".into(),
             content: "hello".into(),
             timestamp: 1000,
+                is_mine: false,
         };
 
         let standard = inbox::StandardMessage {

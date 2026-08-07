@@ -9,6 +9,18 @@ pub enum Platform {
     Instagram,
     Twitter,
     LinkedIn,
+    Rss,
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Platform::Instagram => write!(f, "Instagram"),
+            Platform::Twitter => write!(f, "Twitter"),
+            Platform::LinkedIn => write!(f, "LinkedIn"),
+            Platform::Rss => write!(f, "Rss"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +90,7 @@ pub struct Message {
     pub sender_id: UserId,
     pub content: String,
     pub timestamp: u64,
+    pub is_mine: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +103,7 @@ pub struct Comment {
     pub content: String,
     pub timestamp: u64,
     pub likes: u32,
+    pub is_mine: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,6 +1,7 @@
 pub mod instagram;
 pub mod twitter;
 pub mod linkedin;
+pub mod rss;
 
 use crate::types::{Credential, Platform, Post, SocialUser};
 use async_trait::async_trait;
@@ -21,6 +22,13 @@ pub trait PlatformIngester {
     }
 
     async fn refresh_session(&mut self, credential: &Credential) -> Result<Credential, String>;
+
+    /// Send a DM/text reply. Platforms that don't support outbound sending
+    /// return a descriptive error by default.
+    async fn send_message(&mut self, credential: &Credential, conversation_id: &str, content: &str) -> Result<(), String> {
+        let _ = (credential, conversation_id, content);
+        Err(format!("{}: sending messages is not supported", self.platform()))
+    }
 }
 
 fn group_messages_by_conversation(msgs: Vec<crate::types::Message>) -> Vec<(crate::types::Conversation, Vec<crate::types::Message>)> {
@@ -114,6 +122,7 @@ mod tests {
             sender_id: sender.to_string(),
             content: "hello".into(),
             timestamp: ts,
+            is_mine: false,
         }
     }
 

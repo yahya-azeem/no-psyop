@@ -1,4 +1,4 @@
-export type Platform = 'Instagram' | 'Twitter' | 'LinkedIn';
+export type Platform = 'Instagram' | 'Twitter' | 'LinkedIn' | 'Rss';
 
 export interface Post {
   id: string;
@@ -25,6 +25,7 @@ export interface Message {
   sender_id: string;
   content: string;
   timestamp: number;
+  is_mine: boolean;
 }
 
 export interface FeedItem {
@@ -76,6 +77,7 @@ export interface Comment {
   content: string;
   timestamp: number;
   likes: number;
+  is_mine: boolean;
 }
 
 export interface Digest {

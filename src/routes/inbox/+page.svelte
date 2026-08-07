@@ -11,6 +11,9 @@
   let loading = $state(false);
   let syncingMsgs = $state(false);
   let syncMsg = $state('');
+  let reply = $state('');
+  let sending = $state(false);
+  let sendMsg = $state('');
   let prevVersion = $state($startupSync.version);
 
   async function loadConversations() {
@@ -49,6 +52,7 @@
   async function selectConversation(conv: Conversation) {
     selectedConv = conv.id;
     selectedPlatform = conv.platform;
+    sendMsg = '';
     try {
       messages = await invoke('get_messages', {
         conversationId: conv.id,
@@ -56,6 +60,34 @@
       });
     } catch {
       messages = [];
+    }
+  }
+
+  async function sendReply() {
+    const content = reply.trim();
+    if (!selectedConv || !content) return;
+    sending = true;
+    sendMsg = '';
+    try {
+      await invoke('send_message', {
+        platform: selectedPlatform,
+        conversationId: selectedConv,
+        content,
+      });
+      reply = '';
+      sendMsg = 'Sent.';
+      try {
+        messages = await invoke('get_messages', {
+          conversationId: selectedConv,
+          platform: selectedPlatform,
+        });
+      } catch {
+        /* keep current list */
+      }
+    } catch (e) {
+      sendMsg = `Send failed: ${e}`;
+    } finally {
+      sending = false;
     }
   }
 
@@ -131,16 +163,38 @@
           {#each messages as msg}
             <div
               class="msg-bubble"
-              class:own={msg.sender_id === 'You' || msg.sender_id === ''}
+              class:own={msg.is_mine || msg.sender_id === 'You' || msg.sender_id === ''}
             >
               <div class="msg-sender">
                 <span class="platform-badge small" style="color: {platformColor(msg.platform)}">{msg.platform}</span>
-                <span class="msg-sender-name">{msg.sender_id || 'You'}</span>
+                <span class="msg-sender-name">{msg.sender_id === 'You' || msg.sender_id === '' ? 'You' : msg.sender_id}</span>
               </div>
               <div class="msg-content">{msg.content}</div>
               <div class="msg-time">{formatTimestamp(msg.timestamp)}</div>
             </div>
           {/each}
+        </div>
+        <div class="composer">
+          <textarea
+            class="composer-input"
+            placeholder={`Reply on ${selectedPlatform}…`}
+            bind:value={reply}
+            rows="2"
+            onkeydown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendReply();
+              }
+            }}
+          ></textarea>
+          <div class="composer-bar">
+            <button class="btn btn-primary" onclick={sendReply} disabled={sending || !reply.trim()}>
+              {sending ? 'Sending…' : 'Send'}
+            </button>
+            {#if sendMsg}
+              <span class="sync-msg">{sendMsg}</span>
+            {/if}
+          </div>
         </div>
       {:else}
         <p class="empty-hint">Select a conversation to view messages.</p>
@@ -184,5 +238,9 @@
   .msg-sender-name { font-weight: 700; }
   .msg-content { font-size: 0.9rem; line-height: 1.5; }
   .msg-time { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.25rem; }
+  .composer { margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.6rem; }
+  .composer-input { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.5rem 0.65rem; font: inherit; resize: vertical; }
+  .composer-input:focus { outline: none; border-color: var(--accent); }
+  .composer-bar { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
   .empty-hint { color: var(--fg-muted); font-size: 0.85rem; text-align: center; padding: 2rem 0; }
 </style>

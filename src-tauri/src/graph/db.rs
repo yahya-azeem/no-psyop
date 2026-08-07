@@ -77,6 +77,7 @@ impl SocialGraph {
                 sender_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
+                is_mine INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, platform)
             );
 
@@ -117,6 +118,14 @@ impl SocialGraph {
                     col, ty
                 ))?;
             }
+        }
+        let msg_cols: Vec<String> = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(messages)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        if !msg_cols.iter().any(|c| c == "is_mine") {
+            self.conn.execute_batch("ALTER TABLE messages ADD COLUMN is_mine INTEGER NOT NULL DEFAULT 0;")?;
         }
         Ok(())
     }
@@ -364,9 +373,9 @@ impl SocialGraph {
     pub fn save_message(&self, msg: &crate::types::Message) -> Result<()> {
         let platform_int = platform_to_int(&msg.platform);
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, platform, conversation_id, sender_id, content, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![msg.id, platform_int, msg.conversation_id, msg.sender_id, msg.content, msg.timestamp],
+            "INSERT OR IGNORE INTO messages (id, platform, conversation_id, sender_id, content, timestamp, is_mine)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![msg.id, platform_int, msg.conversation_id, msg.sender_id, msg.content, msg.timestamp, msg.is_mine as i32],
         )?;
         Ok(())
     }
@@ -412,7 +421,7 @@ impl SocialGraph {
     pub fn get_messages(&self, conversation_id: &str, platform: &Platform) -> Result<Vec<crate::types::Message>> {
         let platform_int = platform_to_int(platform);
         let mut stmt = self.conn.prepare(
-            "SELECT id, platform, conversation_id, sender_id, content, timestamp
+            "SELECT id, platform, conversation_id, sender_id, content, timestamp, is_mine
              FROM messages
              WHERE conversation_id = ?1 AND platform = ?2
              ORDER BY timestamp ASC"
@@ -425,6 +434,7 @@ impl SocialGraph {
             let sender_id: String = row.get(3)?;
             let content: String = row.get(4)?;
             let timestamp: u64 = row.get(5)?;
+            let is_mine: i32 = row.get(6)?;
 
             Ok(crate::types::Message {
                 id,
@@ -433,6 +443,7 @@ impl SocialGraph {
                 sender_id,
                 content,
                 timestamp,
+                is_mine: is_mine != 0,
             })
         })?;
 
@@ -480,6 +491,7 @@ fn platform_to_int(p: &Platform) -> i32 {
         Platform::Instagram => 0,
         Platform::Twitter => 1,
         Platform::LinkedIn => 2,
+        Platform::Rss => 3,
     }
 }
 
@@ -487,7 +499,8 @@ fn int_to_platform(i: i32) -> Platform {
     match i {
         0 => Platform::Instagram,
         1 => Platform::Twitter,
-        _ => Platform::LinkedIn,
+        2 => Platform::LinkedIn,
+        _ => Platform::Rss,
     }
 }
 
@@ -872,7 +885,7 @@ mod tests {
         let msg = crate::types::Message {
             id: "m1".into(), platform: Platform::Twitter,
             conversation_id: "conv1".into(), sender_id: "user1".into(),
-            content: "hello".into(), timestamp: 1000,
+            content: "hello".into(), timestamp: 1000, is_mine: false,
         };
         graph.save_message(&msg).unwrap();
         let msgs = graph.get_messages("conv1", &Platform::Twitter).unwrap();
