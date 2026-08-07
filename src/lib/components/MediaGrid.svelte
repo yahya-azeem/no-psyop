@@ -4,6 +4,7 @@
   import { playWhenReady } from '$lib/video';
   import { invoke } from '@tauri-apps/api/core';
   import type { Comment, FeedItem, Post } from '$lib/types';
+  import { openExternal } from '$lib/external';
 
   let { items, sectioned = false }: { items: FeedItem[]; sectioned?: boolean } = $props();
   let openIdx = $state(-1);
@@ -77,12 +78,14 @@
   );
   let sections = $derived.by(() => {
     if (!sectioned) return [];
-    const rssSec = rssItems.map((item) => ({ item }));
+    const asRss = (items: { item: FeedItem }[], rss: boolean) =>
+      items.map((s) => ({ item: s.item, rss }));
+    const rssSec = asRss(rssItems.map((item) => ({ item })), true);
     return [
-      { title: 'Feed', sub: 'posts from your networks', entries: feedSec },
-      { title: 'Friends & Family', sub: 'mutuals and close friends', entries: famSec },
-      { title: 'Viral for you', sub: 'high engagement', entries: viralSec },
-      { title: 'Corporate', sub: 'from LinkedIn', entries: corporateSec },
+      { title: 'Feed', sub: 'posts from your networks', entries: asRss(feedSec, false) },
+      { title: 'Friends & Family', sub: 'mutuals and close friends', entries: asRss(famSec, false) },
+      { title: 'Viral for you', sub: 'high engagement', entries: asRss(viralSec, false) },
+      { title: 'Corporate', sub: 'from LinkedIn', entries: asRss(corporateSec, false) },
       { title: 'RSS', sub: 'syndicated feeds', entries: rssSec },
     ].filter((s) => s.entries.length > 0);
   });
@@ -179,6 +182,23 @@
     return u.startsWith('@') ? u : `@${u}`;
   }
 
+  function rssTitle(p: Post) {
+    return (p.content.split('\n')[0] || 'Untitled').trim();
+  }
+
+  function rssExcerpt(p: Post) {
+    const rest = p.content.split('\n').slice(1).join(' ').trim();
+    return rest || p.content.trim();
+  }
+
+  function rssLink(p: Post) {
+    return p.id;
+  }
+
+  function openRssCard(item: FeedItem) {
+    openExternal(rssLink(item.post));
+  }
+
   function nextSlide() {
     if (!current) return;
     const n = current.post.media_urls.length;
@@ -235,46 +255,64 @@
           <span class="section-sub">{sec.sub}</span>
         </div>
         <div class="grid-row">
-          {#each sec.entries as { item }}
-            <button
-              class="grid-cell"
-              class:is-video={item.post.is_video}
-              class:color={isColor(item)}
-              onclick={() => openItem(item)}
-              aria-label={item.post.content || `${item.post.author_username} post`}
-            >
-              {#if item.post.media_urls[0]}
-                {#if item.post.is_video}
-                  <video
-                    src={proxiedMedia(item.post.media_urls[0])}
-                    poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
-                    muted
-                    playsinline
-                    preload="auto"
-                    onmouseenter={playHover}
-                    onmouseleave={pauseHover}
-                    onerror={onMediaError}
-                  ></video>
-                  <span class="cell-badge">▶</span>
-                {:else}
-                  <img
-                    src={proxiedMedia(item.post.media_urls[0])}
-                    alt=""
-                    loading="lazy"
-                    onerror={onMediaError}
-                  />
-                  {#if item.post.media_urls.length > 1}
-                    <span class="cell-count">{item.post.media_urls.length}</span>
-                  {/if}
+          {#each sec.entries as { item, rss }}
+            {#if rss}
+              <button
+                class="rss-card"
+                type="button"
+                onclick={() => openRssCard(item)}
+              >
+                <h4 class="rss-title">{rssTitle(item.post)}</h4>
+                {#if rssExcerpt(item.post)}
+                  <p class="rss-excerpt">{rssExcerpt(item.post)}</p>
                 {/if}
-              {:else}
-                <span class="cell-text">{item.post.content}</span>
-              {/if}
-              {#if isColor(item)}
-                <span class="cell-friend">●</span>
-              {/if}
-              {@render cellBadge(item)}
-            </button>
+                <span class="rss-meta">
+                  <span class="rss-src">◎ {item.post.author_username}</span>
+                  <span class="rss-time">{formatTimestamp(item.post.timestamp)}</span>
+                  <span class="rss-open">open ↗</span>
+                </span>
+              </button>
+            {:else}
+              <button
+                class="grid-cell"
+                class:is-video={item.post.is_video}
+                class:color={isColor(item)}
+                onclick={() => openItem(item)}
+                aria-label={item.post.content || `${item.post.author_username} post`}
+              >
+                {#if item.post.media_urls[0]}
+                  {#if item.post.is_video}
+                    <video
+                      src={proxiedMedia(item.post.media_urls[0])}
+                      poster={item.post.poster_url ? proxiedMedia(item.post.poster_url) : undefined}
+                      muted
+                      playsinline
+                      preload="auto"
+                      onmouseenter={playHover}
+                      onmouseleave={pauseHover}
+                      onerror={onMediaError}
+                    ></video>
+                    <span class="cell-badge">▶</span>
+                  {:else}
+                    <img
+                      src={proxiedMedia(item.post.media_urls[0])}
+                      alt=""
+                      loading="lazy"
+                      onerror={onMediaError}
+                    />
+                    {#if item.post.media_urls.length > 1}
+                      <span class="cell-count">{item.post.media_urls.length}</span>
+                    {/if}
+                  {/if}
+                {:else}
+                  <span class="cell-text">{item.post.content}</span>
+                {/if}
+                {#if isColor(item)}
+                  <span class="cell-friend">●</span>
+                {/if}
+                {@render cellBadge(item)}
+              </button>
+            {/if}
           {/each}
         </div>
       </section>
@@ -526,6 +564,65 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 6;
     line-clamp: 6;
+  }
+  .rss-card {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.9rem 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.1s;
+    text-align: left;
+    color: var(--fg);
+  }
+  .rss-card:hover {
+    border-color: var(--accent);
+  }
+  .rss-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .rss-title {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.35;
+  }
+  .rss-excerpt {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+  }
+  .rss-meta {
+    margin-top: 0.15rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+  }
+  .rss-src {
+    font-weight: 600;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .rss-open {
+    margin-left: auto;
+    color: var(--accent);
+    font-weight: 600;
+    white-space: nowrap;
   }
   .cell-meta {
     position: absolute;
@@ -834,5 +931,34 @@
   }
   .lightbox-nav.next {
     right: 1rem;
+  }
+  @media (max-width: 680px) {
+    .media-grid {
+      grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+      gap: 0.3rem;
+    }
+    .section-head {
+      padding: 0.9rem 0 0.35rem 0;
+    }
+    .section-sub {
+      display: none;
+    }
+    .lightbox-card {
+      width: 100vw;
+      height: 100vh;
+      max-height: 100vh;
+      border-radius: 0;
+    }
+    .lightbox-media :is(img, :global(video)) {
+      max-height: 44vh;
+    }
+    .slide-wrap img {
+      max-height: 44vh;
+    }
+    .lightbox-close, .lightbox-nav {
+      width: 2.6rem;
+      height: 2.6rem;
+      font-size: 1.5rem;
+    }
   }
 </style>

@@ -243,4 +243,17 @@
   .composer-input:focus { outline: none; border-color: var(--accent); }
   .composer-bar { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
   .empty-hint { color: var(--fg-muted); font-size: 0.85rem; text-align: center; padding: 2rem 0; }
+  @media (max-width: 680px) {
+    .inbox-layout {
+      grid-template-columns: 1fr;
+      min-height: 0;
+    }
+    .conv-list {
+      max-height: 36vh;
+    }
+    .msg-area {
+      max-height: none;
+      border-radius: 0;
+    }
+  }
 </style>

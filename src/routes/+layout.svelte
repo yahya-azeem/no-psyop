@@ -2,11 +2,14 @@
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
   import { runStartupSync, startPeriodicSync, stopPeriodicSync, startupSync } from '$lib/autosync';
+  import { registerPwa } from '$lib/pwa';
 
   let { children } = $props();
   let active = $state('feed');
 
   onMount(() => {
+    registerPwa();
+
     // Defer the first sync so the cached feed paints before the browser work
     // for news + feeds kicks off — avoids a CPU spike right at first render.
     const t = setTimeout(() => runStartupSync(), 1500);
@@ -25,7 +28,7 @@
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-header">
-      <h1 class="brand">no pysop</h1>
+      <h1 class="brand">OneMedia</h1>
       <p class="tagline">curated. finite. yours.</p>
     </div>
 
@@ -203,27 +206,52 @@
     padding: 2rem 1.5rem;
   }
 
-  @media (max-width: 640px) {
+  @media (max-width: 680px) {
     .app-shell {
       flex-direction: column;
     }
+
+    /* Sidebar becomes a fixed bottom tab bar on phones. */
     .sidebar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      top: auto;
       width: 100%;
       height: auto;
       flex-direction: row;
-      padding: 0.75rem 1rem;
+      padding: env(safe-area-inset-top) 0;
+      padding-bottom: calc(0.35rem + env(safe-area-inset-bottom));
       border-right: none;
-      border-bottom: 1px solid var(--border);
-      position: static;
+      border-top: 1px solid var(--border);
+      border-bottom: none;
+      background: var(--bg-card);
+      z-index: 50;
     }
     .sidebar-header, .sidebar-footer {
       display: none;
     }
     .sidebar-nav {
       flex-direction: row;
+      flex: 1;
+      justify-content: space-around;
+      gap: 0;
+    }
+    .nav-item {
+      flex-direction: column;
+      gap: 0.2rem;
+      padding: 0.5rem 0.25rem;
+      font-size: 0.7rem;
+    }
+    .nav-icon {
+      width: auto;
+      font-size: 1.2rem;
+      line-height: 1;
     }
     .main-content {
       padding: 1rem;
+      padding-bottom: calc(4.6rem + env(safe-area-inset-bottom));
     }
   }
 </style>

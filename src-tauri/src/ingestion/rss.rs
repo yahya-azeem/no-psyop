@@ -49,10 +49,13 @@ fn post_from_entry(e: &feed_rs::model::Entry, source: &str, source_id: &str) -> 
     }
     let content = content.trim().to_string();
 
-    let id = if e.id.trim().is_empty() {
-        links_primary(&e.links)
-    } else {
-        e.id.clone()
+    let id = {
+        let link = links_primary(&e.links);
+        if !link.is_empty() {
+            link
+        } else {
+            e.id.clone()
+        }
     };
 
     let author = e

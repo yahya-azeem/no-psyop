@@ -1,0 +1,118 @@
+name: iOS
+# Builds the OneMedia iOS app on a macOS runner (GitHub-provided Xcode), since
+# this repo is maintained on a Linux box that has no Apple toolchain.
+#
+#   stage 1  ios-simulator   unsigned simulator build -> proves the Swift host
+#                            compiles + app runs. No Apple account needed.
+#   stage 2  ios-signed-ipa  real-device sideload .ipa. Needs Apple creds as
+#                            Actions secrets (see the step notes).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ios_signed:
+        description: Build a signed sideload .ipa (needs Apple secrets)
+        type: boolean
+        default: false
+
+jobs:
+  ios-simulator:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Rust + iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend + CLI deps
+        run: bun install
+
+      - name: Build scraper engine (web-session.js)
+        run: bun run build:session
+
+      - name: Generate the iOS project
+        run: bun run tauri ios init
+
+      - name: Link WebSessionHost.swift into the target
+        run: |
+          sudo gem install xcodeproj --no-document
+          ruby scripts/ios/link_websession.rb
+
+      - name: Build (simulator, unsigned)
+        run: bun run tauri ios build --target aarch64-apple-ios-sim
+
+      - name: Upload .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneMedia-simulator
+          path: |
+            src-tauri/target/aarch64-apple-ios-sim/**/OneMedia.app
+          if-no-files-found: warn
+
+  ios-signed-ipa:
+    runs-on: macos-latest
+    needs: ios-simulator
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.ios_signed == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require Apple credentials
+        run: |
+          for v in IOS_CERTIFICATE IOS_CERTIFICATE_PASSWORD IOS_MOBILE_PROVISION; do
+            [ -n "$secret_${v}" ] || { echo "missing $v secret"; exit 1; }
+          done
+        env:
+          secret_IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          secret_IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          secret_IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Rust + device target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend + build engine
+        run: |
+          bun install
+          bun run build:session
+
+      - name: Generate + link host
+        run: |
+          bun run tauri ios init
+          sudo gem install xcodeproj --no-document
+          ruby scripts/ios/link_websession.rb
+
+      # Cast the manual signing creds Tauri's CLI reads at export time.
+      # These are base64 of the .p12 and .mobileprovision (see tauri #9963).
+      - name: Build signed .ipa (device)
+        run: bun run tauri ios build --target aarch64-apple-ios
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneMedia-signed
+          path: |
+            src-tauri/target/aarch64-apple-ios/release/bundle/ios/OneMedia.ipa
+          if-no-files-found: warn

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "No Pysop",
+  "productName": "OneMedia",
   "version": "0.1.0",
-  "identifier": "com.yahya.nopysop",
+  "identifier": "one.media.app",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "no pysop",
+        "title": "OneMedia",
         "width": 800,
         "height": 600,
         "visible": true
@@ -25,6 +25,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "../ios/WebSession/web-session.js"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

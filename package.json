@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "build:session": "mkdir -p ios/WebSession && bun build ./src/lib/scrape/embed.ts --target browser --format iife --outfile ios/WebSession/web-session.js --minify",
     "tauri": "tauri"
   },
   "license": "MIT",
